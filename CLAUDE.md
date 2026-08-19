@@ -5,6 +5,11 @@ Guidance for anyone (human or AI agent) submitting a pull request. This is the h
 rules, add-a-metric/screen/command recipes), [`docs/BUILD.md`](docs/BUILD.md) covers signing/pairing,
 and [`docs/IOS.md`](docs/IOS.md) covers the iOS target. Read this first; follow the links for depth.
 
+**Hardware on hand:** the maintainer's own strap is a **WHOOP 5.0**, so that is the device any
+"can you check / try this" is run against, and the family to assume when a report or question does
+not name one. Anything 4.0-specific (e.g. the sparse 4.0 motion buffer behind #345) cannot be
+verified here without a borrowed strap — say so rather than claiming it was tested.
+
 ## What NOOP is (and the hard scope limits)
 
 NOOP is a **fully offline, on-device** companion app for WHOOP 4.0 and 5.0/MG straps (with
