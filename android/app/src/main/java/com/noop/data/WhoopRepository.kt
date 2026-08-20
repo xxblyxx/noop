@@ -243,6 +243,19 @@ internal fun assignRrSeq(deviceId: String, rows: List<RrRow>): List<RrInterval> 
     }
 }
 
+/**
+ * #1451: the wall-seconds an AUTHORITATIVE (historical) R-R batch owns — the distinct timestamps it
+ * actually carries beats for, ascending. [WhoopRepository.insertHistorical] clears exactly these before
+ * writing, so this list is the whole blast radius of that delete and is kept pure and testable on both
+ * platforms.
+ *
+ * A second the batch carries no beats for is deliberately ABSENT: the strap's detector finding nothing is
+ * not grounds to delete what the live stream saw there. Sorted so the deletes run in timestamp order
+ * (stable, and index-friendly on the `(deviceId, ts, …)` primary key) — the SET is what matters, the order
+ * is for predictability. Byte-parity twin of Swift `WhoopStore.rrSecondsCovered`.
+ */
+internal fun rrSecondsCovered(rows: List<RrRow>): List<Long> = rows.map { it.ts }.distinct().sorted()
+
 /** payloadJSON is the deterministic sorted-keys JSON for the remaining parsed fields. */
 data class EventEntry(val ts: Long, val kind: String, val payloadJSON: String)
 data class BatteryRow(val ts: Long, val soc: Double?, val mv: Int?, val charging: Boolean? = null)
@@ -431,6 +444,8 @@ class WhoopRepository(
         // shipped constants. (#888)
         v18AuxRetentionRows: Int = V18_AUX_RETENTION_ROWS,
         v18AuxPruneEveryRows: Int = V18_AUX_PRUNE_EVERY_ROWS,
+        // #1451: false for the live stream (the default), true only for the offload — see [insertHistorical].
+        rrAuthoritative: Boolean = false,
     ): InsertCounts {
         if (streams.isEmpty) return InsertCounts()
 
@@ -440,9 +455,39 @@ class WhoopRepository(
                 deviceId = deviceId,
                 v18AuxRetentionRows = v18AuxRetentionRows,
                 v18AuxPruneEveryRows = v18AuxPruneEveryRows,
+                rrAuthoritative = rrAuthoritative,
             )
         }
     }
+
+    /**
+     * #1451: [insert] for a batch decoded from the strap's OWN BANKED HISTORY, where the strap's record is
+     * authoritative for every second it covers.
+     *
+     * WHY THIS EXISTS. Two paths write R-R for the same wall-second: the live stream, as beats arrive, and
+     * the offload, when the strap's own record of those same seconds is downloaded later. The two disagree
+     * by a few milliseconds, so `ON CONFLICT … IGNORE` cannot collapse them and BOTH survive — the same
+     * heartbeats stored twice. Measured on a WHOOP 5.0 over a 6.3 h window: 14,193 rows stored against the
+     * strap's own claim of 8,608 (1.65x), and per second 2.105 s of beat-time where two batches wrote
+     * versus 1.079 s where one did. The excess tracked the BLE connection exactly — zero duplication
+     * across a 2 h 18 m disconnect, resuming in the same minute the phone reconnected.
+     *
+     * So a historical batch CLEARS each second it carries beats for before writing its own. Still
+     * idempotent: re-offloading a chunk deletes and rewrites the same values. A second this batch carries
+     * NO beats for is deliberately left alone. Twin of Swift `WhoopStore.insertHistorical`.
+     */
+    suspend fun insertHistorical(
+        streams: StreamBatch,
+        deviceId: String,
+        v18AuxRetentionRows: Int = V18_AUX_RETENTION_ROWS,
+        v18AuxPruneEveryRows: Int = V18_AUX_PRUNE_EVERY_ROWS,
+    ): InsertCounts = insert(
+        streams = streams,
+        deviceId = deviceId,
+        v18AuxRetentionRows = v18AuxRetentionRows,
+        v18AuxPruneEveryRows = v18AuxPruneEveryRows,
+        rrAuthoritative = true,
+    )
 
     /** All DAO writes for one decoded chunk share the Room transaction opened by [insert]. */
     private suspend fun insertWithinTransaction(
@@ -450,9 +495,20 @@ class WhoopRepository(
         deviceId: String,
         v18AuxRetentionRows: Int,
         v18AuxPruneEveryRows: Int,
+        rrAuthoritative: Boolean = false,
     ): InsertCounts {
         val hrIds = if (streams.hr.isEmpty()) emptyList() else
             dao.insertHr(streams.hr.map { HrSample(deviceId, it.ts, it.bpm) })
+        // #1451: an authoritative (historical) batch owns every second it carries beats for, so whatever
+        // the live stream already wrote for those seconds goes first. Scoped to this device and to exactly
+        // the seconds in this batch — never a range or a window — and inside the transaction [insert]
+        // opened, so a failure leaves the old rows in place rather than a hole. Chunked to stay under
+        // SQLite's bound-variable limit on a long offload chunk.
+        if (rrAuthoritative && streams.rr.isNotEmpty()) {
+            for (chunk in rrSecondsCovered(streams.rr).chunked(RR_CLEAR_CHUNK)) {
+                dao.clearRrForSeconds(deviceId, chunk)
+            }
+        }
         val rrIds = if (streams.rr.isEmpty()) emptyList() else
             dao.insertRr(assignRrSeq(deviceId, streams.rr))
         val evIds = if (streams.events.isEmpty()) emptyList() else
@@ -1876,6 +1932,15 @@ class WhoopRepository(
          * in wall-clock terms. Applied per device, newest-first.
          */
         const val V18_AUX_RETENTION_ROWS = 604_800
+
+        /**
+         * #1451: how many wall-seconds one `clearRrForSeconds` call may name. SQLite binds each element of
+         * an `IN (:seconds)` list as its own variable and caps that at 999 by default, so a long offload
+         * chunk has to arrive in pieces. 500 leaves headroom under the limit and still means one statement
+         * per ~8 minutes of strap history. The Swift twin deletes a second at a time and needs no
+         * equivalent — this is a Room/SQLite binding limit, not a difference in behaviour.
+         */
+        const val RR_CLEAR_CHUNK = 500
 
         /** Rows to bank before running the retention sweep again. The sweep walks up to
          *  [V18_AUX_RETENTION_ROWS] index entries, so running it per insert batch was the cost; the table

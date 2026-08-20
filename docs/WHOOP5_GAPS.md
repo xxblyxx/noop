@@ -41,22 +41,58 @@ spo2   excluded on every WHOOP — import-only (#548)
 Ordered by leverage, not severity. Each item says what would close it and what can be done on the
 strap on hand.
 
-### W1: R-R over-count census on a 5.0/MG ([#1451](https://github.com/ryanbr/noop/issues/1451))
+### W1: R-R over-count census on a 5.0/MG ([#1451](https://github.com/ryanbr/noop/issues/1451)) — **ANSWERED 2026-08-19**
 
-- [ ] Run one history offload on a build carrying the post-[#1452](https://github.com/ryanbr/noop/issues/1452) `rr emit` line
-- [ ] Record `offered / inserted / ratio / ratioRep / perSec / modalGap / fill`
-- [ ] Post the line on #1451; compare against a 4.0 offload if one is reachable
+- [x] Census the strap's own `rr_count` against what the store actually holds
+- [x] Name the family's failure mode: **over-count by duplicate delivery**, not under-count
+- [x] Fix it (`insertHistorical`, both platforms) — confirmation on a real night is owed, and is
+      tracked in [`PENDING_VALIDATION.md`](PENDING_VALIDATION.md) → `rr-historical-authority`
 
-**Why it is first.** [#1008](https://github.com/ryanbr/noop/issues/1008) /
-[#1118](https://github.com/ryanbr/noop/issues/1118) sized the R-R over-count entirely from **4.0**
-nights (raw coverage ~1.74×). Nobody has measured a 5.0, and the answer decides which fix is correct.
-It also sits upstream of [W2](#w2-hrv-beat-spread-distrusted-on-50-nights-1451) and
-[W3](#w3-respiratory-rate-straddles-the-rsa-quality-gate-1364) — both are symptoms of the
-same stream.
+**How it was answered without spending an offload.** `v18AuxSample` persists the strap's OWN
+`rr_count` per second, so the census could be read out of banked history: 22,058 v18 records,
+2026-08-19 20:57:30 → 2026-08-20 03:14:16 UTC (6 h 17 m), decoded with the repo's own `V18AuxCodec`
+and replayed through `RrEmissionStats`. One record per strap-second confirmed as a control
+(Δ`record_index` == Δ`ts` in 22,051 of 22,057 consecutive pairs).
 
-**Correction to #1451's decode table — check this before interpreting a census.** The issue states
-the 4.0 layout applies no interval cap and drops 0 ms values while the 5/MG layout caps at 4 and keeps
-them. **That is not what this tree does.** Both historical paths cap *and* drop:
+**Under-count does not occur; the `min(rrn, 4)` cap never binds.**
+
+| rr_count | 0 | 1 | 2 | 3 | 4 | >4 |
+|---|---|---|---|---|---|---|
+| records | 14,935 | 5,683 | 1,399 | 37 | 4 | **0** |
+
+So `Interpreter.swift:364`'s "rr_count matches the number of valid R-R intervals (100%)" holds, and
+the hypothesis that a record over 4 is silently truncated is not instantiated on this family. Note
+also how sparse the strap is: 68 % of records claim no beats at all.
+
+**Over-count is real, and it is duplicate DELIVERY.** Over the identical window the store held
+**14,193** rows against the strap's claim of **8,608** (1.65×), stored ≥ claimed in every per-second
+cell, and 240 seconds held beats the strap's own record claimed as 0. The replayed line:
+
+```
+rr emit path=stored-replay offered=14193 inserted=14193 secs=7365 sumRr=12064s span=22607s
+  ratio=0.53 ratioRep=1.64 perSec[1/2/3/4+]=2536/3143/1412/274 modalGap=1s
+  fill[<=1/<=1.5/<=2/>2]=2356/476/2584/1948 claimed=8608
+```
+
+`ratio=0.53` is not a contradiction: it divides by the whole wall span, and two thirds of that span
+carries no claimed beats. The duplication shows per REPORTING second, which is what `fill` measures —
+4,532 of 7,364 slots carry more than 1.5× the beat-time of the slot they cover.
+
+**Mechanism, proven rather than inferred.** `ord` is batch-local (`StreamStore.swift:182`), so two
+rows sharing `(ts, ord)` mean two batches wrote that second — 4,012 of 7,365 reporting seconds. Split
+by that flag: duplicated seconds hold **2.105 s** of beat-time per wall second, clean seconds
+**1.079 s**. The strap's own `BLE_CONNECTION_UP/DOWN` events settle which two batches: across the
+23:58:38 → 02:16:38 UTC disconnect there are **zero** duplicated seconds in every 10-minute bucket,
+and duplication resumes in the bucket containing the reconnect. While connected, the live path banks
+beats as they stream AND the offload later re-delivers the same seconds; their millisecond values
+differ, so `ON CONFLICT(deviceId, ts, rrMs, seq) DO NOTHING` cannot collapse them.
+
+That also reframes [W2](#w2-hrv-beat-spread-distrusted-on-50-nights-1451): a night's 1.3–1.8 coverage
+is largely a read of how much of the night the phone stayed connected, not a property of the strap.
+
+**Correction to #1451's decode table, kept for the record.** The issue states the 4.0 layout applies
+no interval cap and drops 0 ms values while the 5/MG caps at 4 and keeps them. **That is not what
+this tree does.** Both historical paths cap *and* drop:
 
 | Path | Site | Cap | 0 ms values |
 |---|---|---|---|
@@ -65,26 +101,12 @@ them. **That is not what this tree does.** Both historical paths cap *and* drop:
 | Kotlin twins | `HistoricalStreams.kt:265` / `:361` | `minOf(rrn, 4)` | dropped (`v != 0`) |
 
 The only site that keeps 0 ms values is the type-43 `raw_data` hook (`PostHooks.swift:249`) — a
-realtime path, not a historical one, and not 5/MG-specific. So the "5.0 keeps zeros" asymmetry does not
-hold here, and a census read through that lens would be misread. Post this on #1451 before drawing a
-conclusion from the numbers.
+realtime path, not a historical one, and not 5/MG-specific.
 
-**What is genuinely shared, and is the likely root.** Both families stamp **every** R-R in a record
-with the record's own timestamp, discarding sub-second timing
-(`HistoricalStreams.swift:251` and `:375`, plus the Kotlin twin):
-
-```swift
-if let rrs = p["rr_intervals"]?.intArrayValue {
-    for rr in rrs { out.rr.append(RRInterval(ts: ts, rrMs: rr)) }
-}
-```
-
-That structurally caps `beatAccurateFraction` near 0.6 whatever the sensor does. And since the cap of 4
-applies to *both* families, any record whose `rr_count` exceeds 4 is under-counted on both — which the
-census's `offered` vs the record's own `rr_count` would show directly.
-
-**Done when** the census line exists for a 5.0, #1451's decode table is corrected or explained, and the
-family's actual failure mode (over- or under-count) is named.
+**Still true and still unfixed:** every R-R in a record is stamped with the record's own timestamp
+(`HistoricalStreams.swift:251` and `:375`, plus the Kotlin twin), which is why even the clean,
+single-batch seconds read 1.079 rather than 1.000. That is a separate, smaller defect from the
+duplication — it caps `beatAccurateFraction` and belongs to [W3](#w3-respiratory-rate-straddles-the-rsa-quality-gate-1364).
 
 ### W2: HRV beat-spread distrusted on 5.0 nights ([#1451](https://github.com/ryanbr/noop/issues/1451))
 
@@ -134,7 +156,7 @@ tune the threshold before that is known — the gate is behaving as designed.
 
 - [ ] Capture a night with `sleep_state = asleep` coverage plus the matching WHOOP CSV export
 - [ ] Run `python3 Tools/linux-capture/validate_spo2_candidate.py capture.json export/ --device <label> --postable`
-- [ ] Post the `--postable` block (offsets and aggregates only — no raw values) on #103
+- [ ] Record the `--postable` block (offsets and aggregates only — no raw values) in this doc
 
 **Where it stands.** v18 `@82` is already decoded as `spo2_candidate_82` — a strap-computed SpO₂ %
 scalar, tri-mode (70–100 a real %, bit-7 a saturation sentinel, other sub-70 a diagnostic code),
@@ -158,7 +180,7 @@ Apple Health import populates the card with WHOOP's own values.
 
 ### W5: Live raw accel / IMU on 5/MG ([#423](https://github.com/ryanbr/noop/issues/423))
 
-- [ ] Agree the gated-probe plan on #423 before touching the BLE path (per
+- [ ] Write the gated-probe plan down in this doc before touching the BLE path (per
       [`CONTRIBUTING.md`](CONTRIBUTING.md) §BLE safety contract)
 - [ ] Probe, behind `PuffinExperiment`, one opcode per attempt with a 30 s frame census and no
       persistence: 81 (`START_RAW_DATA`) → 63 → 105 (`TOGGLE_IMU_MODE_HISTORICAL`) → 132

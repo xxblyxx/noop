@@ -12,9 +12,27 @@ protocol BackfillStoreWriting: AnyObject {
     func insert(_ streams: Streams, deviceId: String) async throws
         -> (hr: Int, rr: Int, events: Int, battery: Int,
             spo2: Int, skinTemp: Int, resp: Int, gravity: Int)
+    /// #1451: the offload's write. Same insert, except the strap's own record wins for every second it
+    /// carries beats for — see `WhoopStore.insertHistorical`. A separate method rather than a flag on
+    /// `insert` because a Swift witness must match the requirement's parameter list exactly, so a
+    /// defaulted argument cannot satisfy `insert(_:deviceId:)`.
+    @discardableResult
+    func insertHistorical(_ streams: Streams, deviceId: String) async throws
+        -> (hr: Int, rr: Int, events: Int, battery: Int,
+            spo2: Int, skinTemp: Int, resp: Int, gravity: Int)
     func enqueueRawBatch(_ meta: RawBatchMeta, frames: [[UInt8]]) async throws
     func setCursor(_ name: String, _ value: Int) async throws
     func cursor(_ name: String) async throws -> Int?
+}
+extension BackfillStoreWriting {
+    /// Default for test doubles that only implement plain `insert`: same rows, no authority. Production
+    /// goes through `WhoopStore`, which implements the real one (`StreamStore.swift`).
+    @discardableResult
+    func insertHistorical(_ streams: Streams, deviceId: String) async throws
+        -> (hr: Int, rr: Int, events: Int, battery: Int,
+            spo2: Int, skinTemp: Int, resp: Int, gravity: Int) {
+        try await insert(streams, deviceId: deviceId)
+    }
 }
 
 extension WhoopStore: BackfillStoreWriting {}
@@ -634,7 +652,7 @@ final class Backfiller {
             // emission can be measured, since every existing R-R number is taken after the ON CONFLICT key
             // has already absorbed part of it.
             let rrCensus = RrEmissionStats.compute(decoded.rr.map { (ts: $0.ts, rrMs: $0.rrMs) })
-            do { counts = try await store.insert(decoded, deviceId: deviceId) } catch {
+            do { counts = try await store.insertHistorical(decoded, deviceId: deviceId) } catch {
                 // Diag (#601): the decoded rows couldn't be written — this is the "history stalls but live HR
                 // works" class. We return WITHOUT acking so the strap keeps this chunk and re-sends it next
                 // session (no data loss), but a silent return left a strap log with no trace of the stall.

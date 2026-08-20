@@ -58,6 +58,18 @@ extension WhoopStore {
         return out
     }
 
+    /// #1451: the wall-seconds an AUTHORITATIVE (historical) R-R batch owns — the distinct timestamps it
+    /// actually carries beats for, ascending. `insertHistorical` clears exactly these before writing, so
+    /// this list is the whole blast radius of that delete and is kept pure and testable on both platforms.
+    ///
+    /// A second the batch carries no beats for is deliberately ABSENT: the strap's detector finding
+    /// nothing is not grounds to delete what the live stream saw there. Sorted so the deletes run in
+    /// timestamp order (stable, and index-friendly on the `(deviceId, ts, …)` primary key) — the SET is
+    /// what matters, the order is for predictability. Byte-parity twin of Kotlin `rrSecondsCovered`.
+    public static func rrSecondsCovered(_ rr: [RRInterval]) -> [Int] {
+        Array(Set(rr.map(\.ts))).sorted()
+    }
+
     /// #423 rolling retention for the raw-IMU capture table (twin of Kotlin `RAW_IMU_RETENTION_ROWS`):
     /// ~1 h at 1 row/strap-second (~4 MB) hard-caps the table during a multi-day offload replay.
     public static let rawImuRetentionRows = 3600
@@ -138,6 +150,38 @@ extension WhoopStore {
                          v18AuxPruneEveryRows: WhoopStore.v18AuxPruneEveryRows)
     }
 
+    /// `insert(_:deviceId:)` for a batch decoded from the strap's OWN BANKED HISTORY, where the strap's
+    /// record is authoritative for every second it covers (#1451).
+    ///
+    /// WHY THIS EXISTS. Two paths write R-R for the same wall-second: the live stream, as beats arrive,
+    /// and the offload, when the strap's own record of those same seconds is downloaded later. The two
+    /// disagree by a few milliseconds, so `ON CONFLICT(deviceId, ts, rrMs, seq) DO NOTHING` cannot
+    /// collapse them and BOTH survive — the same heartbeats stored twice. Measured on a WHOOP 5.0 over a
+    /// 6.3 h window: 14,193 rows stored against the strap's own claim of 8,608 (1.65x), and per second
+    /// 2.105 s of beat-time where two batches wrote versus 1.079 s where one did. The excess tracked the
+    /// BLE connection exactly — zero duplication across a 2 h 18 m disconnect, resuming in the same
+    /// minute the phone reconnected — which is what identifies the live stream as the second writer.
+    ///
+    /// So a historical batch CLEARS each second it carries beats for before writing its own. The strap's
+    /// record is the complete, self-consistent copy (offload-only stretches match the strap's claim
+    /// exactly); the live stream is the surplus. Still idempotent: re-offloading a chunk deletes and
+    /// rewrites the same values.
+    ///
+    /// Deliberately NOT cleared: a second this batch carries NO beats for. The strap's beat detector
+    /// reporting nothing does not license deleting live rows there — that would drop data with nothing
+    /// to put in its place. Those seconds keep whatever the live stream saw.
+    ///
+    /// Twin of Kotlin `WhoopRepository.insertHistorical`.
+    @discardableResult
+    public func insertHistorical(_ streams: Streams, deviceId: String) async throws
+        -> (hr: Int, rr: Int, events: Int, battery: Int,
+            spo2: Int, skinTemp: Int, resp: Int, gravity: Int) {
+        try await insert(streams, deviceId: deviceId,
+                         v18AuxRetentionRows: WhoopStore.v18AuxRetentionRows,
+                         v18AuxPruneEveryRows: WhoopStore.v18AuxPruneEveryRows,
+                         rrAuthoritative: true)
+    }
+
     /// `insert(_:deviceId:)` with the v31 aux-table cap made explicit. Internal and a SEPARATE overload
     /// rather than a defaulted parameter on the public entry point: `StoreWriting` / `BackfillStoreWriting`
     /// require `insert(_:deviceId:)` exactly, and a Swift witness must match the requirement's parameter
@@ -145,7 +189,7 @@ extension WhoopStore {
     /// small cap instead of writing 600k rows; every production caller goes through the wrapper above.
     @discardableResult
     func insert(_ streams: Streams, deviceId: String, v18AuxRetentionRows: Int,
-                v18AuxPruneEveryRows: Int) async throws
+                v18AuxPruneEveryRows: Int, rrAuthoritative: Bool = false) async throws
         -> (hr: Int, rr: Int, events: Int, battery: Int,
             spo2: Int, skinTemp: Int, resp: Int, gravity: Int) {
         // Banked rows, accumulated across batches so the sweep does not run on every one.
@@ -169,6 +213,18 @@ extension WhoopStore {
                 }
             }
             if !streams.rr.isEmpty {
+                // #1451: an authoritative (historical) batch owns every second it carries beats for, so
+                // whatever the live stream already wrote for those seconds goes first. Scoped to this
+                // device and to exactly the seconds in this batch — never a range or a window — and run
+                // inside the same transaction as the insert below, so a failure leaves the old rows in
+                // place rather than a hole. See `insertHistorical` for the measurement behind it.
+                if rrAuthoritative {
+                    let del = try db.cachedStatement(sql:
+                        "DELETE FROM rrInterval WHERE deviceId = ? AND ts = ?")
+                    for ts in WhoopStore.rrSecondsCovered(streams.rr) {
+                        try del.execute(arguments: [deviceId, ts])
+                    }
+                }
                 let stmt = try db.cachedStatement(sql: """
                     INSERT INTO rrInterval (deviceId, ts, rrMs, seq, ord, srcChannel)
                     VALUES (?, ?, ?, ?, ?, ?)

@@ -950,6 +950,17 @@ interface WhoopDao : DeviceRegistryDao {
     @Query("DELETE FROM rrInterval WHERE ts < :minTs OR ts > :maxTs")
     suspend fun pruneRrByTs(minTs: Long, maxTs: Long): Int
 
+    /**
+     * #1451: clear this device's stored beats for the given wall-seconds, so an AUTHORITATIVE
+     * (historical) batch can write the strap's own record of them without piling on beside whatever the
+     * live stream already banked. Scoped to `deviceId` AND an explicit timestamp list — never a range —
+     * so the blast radius is exactly the seconds the caller is about to rewrite. Callers chunk the list
+     * (see [WhoopRepository.RR_CLEAR_CHUNK]) to stay under SQLite's bound-variable limit. Runs inside the
+     * caller's transaction. Twin of the DELETE in Swift `StreamStore.insert` under `rrAuthoritative`.
+     */
+    @Query("DELETE FROM rrInterval WHERE deviceId = :deviceId AND ts IN (:seconds)")
+    suspend fun clearRrForSeconds(deviceId: String, seconds: List<Long>): Int
+
     @Query("DELETE FROM skinTempSample WHERE ts < :minTs OR ts > :maxTs")
     suspend fun pruneSkinTempByTs(minTs: Long, maxTs: Long): Int
 

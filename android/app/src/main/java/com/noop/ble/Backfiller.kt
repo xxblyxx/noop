@@ -548,7 +548,7 @@ class Backfiller(
                 // emission can be measured, since every existing R-R number is taken after the conflict
                 // key has already absorbed part of it.
                 val rrCensus = com.noop.analytics.RrEmissionStats.compute(decoded.rr.map { it.ts.toInt() to it.rrMs })
-                val counts = repository.insert(decoded, deviceId)
+                val counts = repository.insertHistorical(decoded, deviceId)
                 committed = decoded
                 // Success-side observability (#150): tally what actually persisted so the session can emit
                 // "persisted N rows (M with motion) across K night(s)" — the win-rate signal we never logged.
