@@ -51,6 +51,20 @@ unless the owner asks for it in that session — the commit is the deliverable, 
 separate decision (see the visibility warning above). The `docs/` guides are written for upstream's
 public workflow — read them for technical depth, not for process.
 
+**NOOP's own data is the first-party source.** Whatever the strap sends over BLE and whatever NOOP
+decodes, stores and computes on-device is the source of truth for every surface. Prefer it whenever
+it can answer the question at all — including when it is rougher, sparser, or less flattering than a
+number some other app already has. The point of this project is reading YOUR strap yourself; a
+surface that quietly shows another vendor's figure makes the number untraceable and the app a viewer
+for someone else's cloud.
+
+**Apple Health / HealthKit and third-party imports are secondary — ASK FIRST.** Do not wire a screen,
+tile or metric to Apple Health data on your own initiative, even when the Health value is already
+imported, better calibrated, and sitting right there. Say what NOOP's own data can and cannot do,
+name the Health value as an option, and let the owner choose. (Some surfaces already read
+`apple-health` — steps, weight, active calories. Those are existing decisions, not a precedent to
+extend.) Whichever source wins, the surface must say which one it is.
+
 **Hardware on hand: a WHOOP 5.0.** That is what any "can you check this" runs against, and the family
 to assume when a question doesn't name one. Anything 4.0-specific cannot be verified here — say so
 rather than claiming it was tested.
