@@ -113,11 +113,26 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 - needs: one overnight offload on the fixed build, with the phone connected for the whole night
   (that is the condition that produced the duplication — a disconnected stretch banks once and would
   pass trivially).
-- blocked-because: 🔴 NOT YET RUN. The evidence behind the fix is a 6 h 17 m DAYTIME window
-  (2026-08-19 20:57→03:14 UTC, `v18AuxSample` n=22,058): stored 14,193 rows vs the strap's claim of
-  8,608, 2.105 s of beat-time per wall second where two batches wrote vs 1.079 s where one did, and
-  zero duplicated seconds across the 23:58:38→02:16:38 BLE disconnect. No night has been measured at
-  all, before or after.
+- blocked-because: 🟡 MEASURED 2026-08-20, BUT THE NIGHT DOES NOT COUNT — it ran on a PRE-FIX
+  binary. The fix landed on `main` at 2026-08-19 21:17 -0700, ~2 h before the night began, but the
+  phone was not rebuilt until 2026-08-20 09:13, so the overnight ingest used the old code. The night
+  therefore measures the BUG, not the fix, and cannot settle this entry.
+  WHAT IT DOES GIVE: the first real overnight baseline, and it is worse than the daytime figure
+  that motivated the fix. Over the full sleep window (2026-08-19 23:28:01→2026-08-20 07:43:16,
+  `v18AuxSample` n=29,711, phone connected throughout): claimed Σ rr_count 26,722 vs stored 53,123 —
+  **ratio 1.988** — with 23,483 duplicated `(ts, ord)` pairs across 26,300 reporting seconds
+  (**89.3 %**). Every hour from 00:00 to 08:00 sits at 1.95–1.99 with 85–93 % duplication, i.e. a
+  steady ~2.0, which this entry's own passes-if calls "the clear is not firing at all" — correct, it
+  was not in the binary. The 1.65x daytime measurement understated the nightly cost.
+  THE FIX DOES APPEAR TO WORK, on a window that cannot satisfy `needs`. Hourly ratios
+  break sharply at the install: 08:00 = 1.992 (86.2 % dup), 09:00 = 1.138 (7.2 %), 10:00 = 1.102
+  (0.59 %). A clean post-install slice, 09:20→10:22, reads **ratio 1.069 with 10 duplicated pairs
+  over 1,241 reporting seconds**. Ratio is inside the 1.0–1.1 pass band and the residual is the
+  handful `testALiveInsertNeverClearsAnything` predicts. But it is a ~1 h DAYTIME window, which is
+  exactly the case `needs` rules out as passing trivially, so it is corroboration, not the check.
+  NO OVER-DELETION: 3,411 seconds in the night carried a claimed count of 0, and 1,678 of them still
+  hold R-R rows, so the clear is not eating seconds the strap banked nothing for. Ratio never went
+  below 1.0 in any window.
 - check: pull the store and re-run the Phase 0 analysis over the new night —
   `xcrun devicectl device copy from --device 00008150-000E434E3AD8401C --domain-type
   appDataContainer --domain-identifier com.bly.noop --source "Library/Application
@@ -132,7 +147,7 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   Collector buffers ~30 readings before flushing. A steady ~2.0 means the clear is not firing at all;
   a ratio well BELOW 1.0 means it deletes more than it replaces and is the worse failure — check that
   seconds the strap claimed 0 beats for still hold their live rows.
-- check-after: 2026-08-20
+- check-after: 2026-08-21
 
 ## Settled
 
