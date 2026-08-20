@@ -45,9 +45,10 @@ anonymous. Clean-room interoperability only. A change is out of scope if it send
 phones home, or adds firmware / decompiled code / WHOOP assets — see
 [`docs/SCOPE.md`](docs/SCOPE.md).
 
-**Work lands as direct commits to `main`, and stops there.** There is no contributor flow and no
-review queue here, so "open a PR" is not a step. Commit when the work is done; do **not** `git push`
-unless the owner asks for it in that session — the commit is the deliverable, publishing is a
+**Work lands as commits on a working branch, merged into `main` locally, and stops there.** There
+is no contributor flow and no review queue here, so "open a PR" is not a step — the merge happens on
+this machine (see "git branching" below). Commit when the work is done; do **not** `git push` unless
+the owner asks for it in that session — the commit on `main` is the deliverable, publishing is a
 separate decision (see the visibility warning above). The `docs/` guides are written for upstream's
 public workflow — read them for technical depth, not for process.
 
@@ -133,8 +134,8 @@ These rules are **not** in this file. Load the doc before touching the area.
 
 - **`swift-packages.yml` does not compile the app targets, and nothing else does either.**
   `app-build.yml` is not disabled — it is alive but triggers only on `pull_request` to `main` (plus
-  manual `workflow_dispatch`), and it deliberately has no `push: main` leg. Since work here lands as
-  direct commits and never as a PR, that trigger never fires. Net effect is the same as if it were
+  manual `workflow_dispatch`), and it deliberately has no `push: main` leg. Since work here is merged
+  locally and never arrives as a PR, that trigger never fires. Net effect is the same as if it were
   off: touch anything under `Strand/`, `StrandiOS/`, `StrandiOSShared/`, `StrandiOSWidgets/` and **no
   CI validates it** — a compile error passes every green check. Build it yourself:
   `xcodegen generate && xcodebuild … build`.
@@ -144,6 +145,20 @@ These rules are **not** in this file. Load the doc before touching the area.
   `android.yml` and do not push in order to trigger it — pushing is the owner's call, and the Android
   build is not wanted. Never imply the Kotlin was run. Accept the consequence honestly: the twin's
   correctness rests on review and on parity with the Swift it mirrors, nothing more.
+
+## git branching
+
+Maintain the integrity of `main` — always create a branch to work from. Before implementing any code
+change, if you are on `main`, ask the owner whether to create a branch and recommend a branch name.
+Do not start editing until that's settled.
+
+- This applies to code changes, not to docs-only tweaks the owner asked for directly. A change that
+  touches both is a code change.
+- Branch names follow the convention `feat/…`, `fix/…`, `docs/…`.
+- When the work is verified, `git merge --ff-only` into `main` and delete the branch. `--ff-only` is
+  deliberate: it fails loudly rather than quietly writing a merge commit if `main` moved.
+- Branches never leave this machine. No push, no PR — see the never-contact-upstream rule at the top
+  of this file.
 
 ## Commits
 
