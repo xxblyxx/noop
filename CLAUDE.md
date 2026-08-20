@@ -20,10 +20,14 @@ ask for permission to; the answer is already no. Issue numbers in this tree are 
 tracking work locally, never destinations.
 
 
-Guidance for anyone (human or AI agent) submitting a pull request. This is the high-signal map;
+Guidance for working in this tree — the maintainer, and any AI agent acting on their behalf. Work
+lands as **direct commits to `main`**; there is no external contributor flow and no review queue, so
+"open a PR" is not a step here. This is the high-signal map;
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) is the full guide (BLE safety contract, design-system
 rules, add-a-metric/screen/command recipes), [`docs/BUILD.md`](docs/BUILD.md) covers signing/pairing,
 and [`docs/IOS.md`](docs/IOS.md) covers the iOS target. Read this first; follow the links for depth.
+Those docs are written for upstream's public contributor workflow — read them for the technical
+depth, not for process.
 
 **Hardware on hand:** the maintainer's own strap is a **WHOOP 5.0**, so that is the device any
 "can you check / try this" is run against, and the family to assume when a report or question does
@@ -38,17 +42,17 @@ strap). It pairs over Bluetooth, stores everything in on-device SQLite, and comp
 / HRV / sleep locally. There is **no server, no account, no cloud sync, no telemetry**, and the project stays
 **anonymous** (iOS/Android ship build-from-source / sideload, not via the App Store).
 
-These are hard constraints, not preferences. A PR is out of scope if it:
+These are hard constraints, not preferences. A change is out of scope if it:
 - adds a server, account, cloud sync, or sends any data off-device;
 - adds analytics/telemetry/crash-reporting that phones home;
 - adds WHOOP firmware, decompiled app code, logos/assets, or any DRM circumvention. NOOP is
   **clean-room interoperability** with hardware the user owns — keep it that way. (That bars
   *implementations* and literals, not every fact learned from one: a protocol offset may be
   re-derived with attribution as an unvalidated candidate — see the "facts vs code" bullet in
-  [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) before telling a contributor no.)
+  [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) before ruling it out.)
 
-Licensing: by opening a PR you agree your contribution is under the repo's
-[PolyForm Noncommercial 1.0.0](LICENSE) license.
+Licensing: the repo is under [PolyForm Noncommercial 1.0.0](LICENSE), inherited from upstream.
+Anything written here is covered by it — nothing to agree to, but the noncommercial terms still bind.
 
 ## Architecture at a glance
 
@@ -82,7 +86,7 @@ Swift. So:
 
 - **Analytics and stored data must be byte-identical across Swift and Kotlin.** If you change a
   decoder, an analytics formula, a migration, or a stored value on one platform, change the twin on
-  the other in the same PR (or explicitly call out why not). "It's Compose vs SwiftUI" is *not* a
+  the other in the same commit (or explicitly call out why not). "It's Compose vs SwiftUI" is *not* a
   license to let the numbers diverge.
 - **UI parity is feature-level, not pixel-level.** SwiftUI Charts vs Compose Canvas legitimately
   differ; the *behavior* and the *data* must not.
@@ -103,6 +107,7 @@ Swift. So:
 Versions are pinned by the repo — install these before the loops below:
 - **JDK 17** — Android + Gradle (`sourceCompatibility`/`jvmTarget` are 17 in `android/app/build.gradle.kts`).
   Gradle **8.7** is provisioned by `android/gradlew`; don't install a system Gradle.
+  **Not installed on the maintainer's machine** — see "Kotlin can't be verified here" below.
 - **Android SDK** — `platform-tools`, `platforms;android-34`, `build-tools;34.0.0` (match `compileSdk` /
   build-tools in `android/app/build.gradle.kts`). Point Gradle at it via `android/local.properties`
   (`sdk.dir=…`, gitignored) or `$ANDROID_HOME`.
@@ -118,11 +123,30 @@ Versions are pinned by the repo — install these before the loops below:
   emulation is present — install `qemu-user-static binfmt-support` and the kernel runs them transparently.
   macOS and x86-64 Linux are unaffected.
 
+**Kotlin can't be verified on the maintainer's machine.** This machine has **no JRE, no Android SDK,
+and no `android/local.properties`** — only the Apple toolchain. So `./gradlew testFullDebugUnitTest`
+and `compileFullDebugKotlin` **cannot be run here**, and `android.yml` is disabled by default, which
+means a Kotlin twin can otherwise land with *nothing* having compiled it.
+
+This does **not** waive the parity contract above — the twin still gets written. It changes how the
+work is *reported* and *checked*:
+- **Say so plainly in the commit message.** "Swift side tested via `swift test`; Kotlin twin written
+  but not compiled locally — no Android toolchain on this machine." Never imply the Kotlin was run.
+- **Dispatch `android.yml` on demand** (it has `workflow_dispatch`) so the twin gets a real
+  `assembleFullDebug` + `testFullDebugUnitTest` before it is trusted. That is the only actual
+  verification available for Kotlin here.
+- **Lean on the shared JSON oracles**, which *are* checked by the active `swift-packages.yml` from the
+  Swift side: `schema_oracle.json`, `decoder_oracle.json`, `r20_optical_oracle.json` are each
+  committed twice and byte-compared against the `android/` copy, so a fixture that drifts fails on
+  macOS without any Android tooling.
+- Installing the toolchain is a one-time fix if Kotlin work gets frequent: JDK 17 + the SDK packages
+  listed above, then point Gradle at it via `android/local.properties`.
+
 ### Fast local loops
 ```bash
 # Swift packages (fastest; no Xcode, no strap):
 cd Packages/WhoopProtocol && swift build && swift test     # also OuraProtocol
-# Android JVM unit tests (run on Linux/macOS, no device):
+# Android JVM unit tests (no device) — NOT runnable on the maintainer's machine (no JDK/SDK):
 cd android && ./gradlew testFullDebugUnitTest              # add --tests "com.noop.…" to filter
 cd android && ./gradlew compileFullDebugKotlin             # compile the whole app module
 # macOS app (needs Xcode on macOS):
@@ -135,7 +159,7 @@ xcodegen generate && xcodebuild -project Strand.xcodeproj -scheme Strand \
 |---|---|---|---|
 | `swift-packages.yml` | `swift test` for **`Packages/**` only** (WhoopProtocol, WhoopStore, StrandAnalytics, StrandImport, StrandDesign, NoopLocalAccess) | macos-15 | **active** |
 | `app-build.yml` | **Compile-only** of the **app targets** (`Strand` macOS + `NOOPiOS` iOS). iOS leg needs **macos-26** (iOS 26 SDK / `glassEffect`). | macos-15 / macos-26 | **disabled** (on-demand) |
-| `android.yml` | `assembleFullDebug` + `testFullDebugUnitTest` | ubuntu | **disabled** (compile Android locally) |
+| `android.yml` | `assembleFullDebug` + `testFullDebugUnitTest` | ubuntu | **disabled** — dispatch it; the maintainer's machine has no Android toolchain |
 | `fork-testing-build.yml` / `fork-release.yml` | Staging / release builds (apk + mac + ios) | — | on dispatch |
 
 **The trap:** `swift-packages` does **NOT** compile the app targets. So if you touch **app-target
@@ -210,9 +234,9 @@ reasoned, tests green, never once observed working. A week later nobody remember
 - A missing or malformed `check-after` reads as **ripe**, on purpose — a typo must make noise rather
   than bury an item forever. `Tools/pending-validation.py --list` prints every open entry by hand.
 
-## PR & commit conventions
+## Commit conventions
 
-- **One concern per PR.** Keep a protocol change, a schema migration, and a UI change separate.
+- **One concern per commit.** Keep a protocol change, a schema migration, and a UI change separate.
 - **Show your verification.** BLE → what you tested on hardware. Analytics → the method + a test.
   UI → confirms design tokens only. App-target Swift → that you compiled the app (CI won't).
 - **Keep generated artifacts out of git** (`Strand.xcodeproj/`, `build/`, `.build/`, `*.app`,
