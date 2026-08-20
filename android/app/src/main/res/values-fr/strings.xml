@@ -1775,6 +1775,7 @@
         <item quantity="other">%1$d entraînements</item>
     </plurals>
     <string name="timeline_spo2_not_on_whoop5">Ce bracelet n\'envoie pas de SpO₂ par Bluetooth. Importez un export WHOOP ou Health Connect pour le voir.</string>
+    <string name="timeline_spo2_candidate_sparse">Le bracelet n'enregistre ceci que pendant le sommeil, par courtes salves toutes les ~20 minutes.</string>
     <string name="timeline_resp_not_on_whoop5">Ce bracelet n\'envoie aucun flux de respiration brut. Votre fréquence respiratoire estimée apparaît sur l\'écran Santé.</string>
     <string name="settings_disclosure_expanded">Développé</string>
     <string name="settings_disclosure_collapsed">Réduit</string>

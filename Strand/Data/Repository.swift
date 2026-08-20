@@ -1753,11 +1753,42 @@ final class Repository: ObservableObject {
                     .map { Self.timelinePoint($0.ts, $0.rmssd) }
             }.value
         case .spo2:
-            // The honest raw red/IR ratio proxy (#166: no calibrated %), shown as a unitless trend.
+            // ONE SpO₂ track, two possible sources — the strap decides which, because no strap produces
+            // both. A WHOOP 4.0 banks raw red/IR (v24 `@68`/`@70`) and gets the honest unitless ratio
+            // proxy (#166: no calibrated %). A 5/MG banks NEITHER, so `spo2Sample` stays empty for it
+            // forever; its only SpO₂-shaped signal is the `@82` candidate byte. Offering those as two
+            // separate pills would put a permanently-empty "SpO₂" beside a populated one on every 5/MG.
+            //
+            // Source selection is DATA-DRIVEN, not family-flagged: whichever the strap actually banked
+            // wins, so a legacy bare-"WHOOP" 4.0 that the registry maps to the 5.0 family (#171) still
+            // gets its real ratio rather than being sent down the candidate path by a label.
             let s = (try? await store.spo2Samples(deviceId: source, from: from, to: to, limit: 200_000)) ?? []
             // The up-to-200k-row conversion runs OFF the main actor; only the Sendable `s` rows cross in.
+            if !s.isEmpty {
+                return await Task.detached(priority: .utility) {
+                    s.compactMap { $0.ir > 0 ? Self.timelinePoint($0.ts, Double($0.red) / Double($0.ir)) : nil }
+                }.value
+            }
+            // #103 instrumentation ONLY — never a shipped SpO₂ metric and never a gate input, per the
+            // standing prohibition in `Interpreter.swift` where `spo2_candidate_82` is emitted. It stays
+            // behind the default-off Experimental toggle, and the VIEW relabels the track "candidate
+            // (raw)" whenever this path supplies the points, so the byte is never read as a percentage.
+            guard PuffinExperiment.spo2CandidateDisplayEnabled else { return [] }
+            // Gated to `70...100`, the SAME in-band window the decoder and
+            // `AnalyticsEngine.nightlySpo2CandidateMean` apply: a nonzero value under 70 is a diagnostic
+            // code and a bit-7 value is a saturation sentinel, so plotting either would draw a line that
+            // is not a percentage of anything. `0` is the duty cycle's off-phase, not a reading.
+            //
+            // Sparse BY NATURE, not by failure: the strap banks this in runs of ~30 consecutive seconds
+            // roughly every 20 minutes, and only during sleep — a night yields ~22 clusters totalling a
+            // few hundred points.
+            let aux = (try? await store.v18AuxSamples(deviceId: source, from: from, to: to,
+                                                      limit: 200_000)) ?? []
             return await Task.detached(priority: .utility) {
-                s.compactMap { $0.ir > 0 ? Self.timelinePoint($0.ts, Double($0.red) / Double($0.ir)) : nil }
+                aux.compactMap { a -> TrendPoint? in
+                    guard let v = a.auxByte82, (70...100).contains(v) else { return nil }
+                    return Self.timelinePoint(a.ts, Double(v))
+                }
             }.value
         case .skinTemp:
             let s = (try? await store.skinTempSamples(deviceId: source, from: from, to: to, limit: 200_000)) ?? []

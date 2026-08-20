@@ -1757,6 +1757,7 @@
         <item quantity="other">%1$d entrenamientos</item>
     </plurals>
     <string name="timeline_spo2_not_on_whoop5">Esta correa no envía SpO₂ por Bluetooth. Importa una exportación de WHOOP o Health Connect para verlo.</string>
+    <string name="timeline_spo2_candidate_sparse">La banda solo registra esto durante el sueño, en ráfagas cortas cada ~20 minutos.</string>
     <string name="timeline_resp_not_on_whoop5">Esta correa no envía datos de respiración sin procesar. Tu frecuencia respiratoria estimada aparece en la pantalla Salud.</string>
     <string name="settings_disclosure_expanded">Expandido</string>
     <string name="settings_disclosure_collapsed">Contraído</string>

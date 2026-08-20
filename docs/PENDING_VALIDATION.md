@@ -50,6 +50,56 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 
 ## Open
 
+### The `@82` SpO2 candidate is shown as a track, and still is not a validated percentage
+- id: spo2-candidate-82-timeline
+- shipped: `main` 2026-08-20 (#103) — `Repository.timelineRawMetric` `.spo2` + `FullDayChartView`,
+  Kotlin twin in `FullDayChartScreen.kt`. The Deep Timeline's SINGLE SpO₂ track now falls back to the
+  raw `@82` byte when the strap banked no `spo2Sample` (i.e. any 5/MG) and the default-off
+  Experimental toggle (`PuffinExperiment.spo2CandidateDisplayKey`) is on, plotting only the
+  `70...100` in-band bytes. Source selection is data-driven. The track is labelled plainly "SpO₂"
+  whichever source feeds it — an earlier "SpO₂ Candidate (raw)" relabel was REMOVED by explicit owner
+  decision on 2026-08-20. ⚠️ That raises the stakes of this entry: nothing on screen now separates the
+  unvalidated `@82` byte from a calibrated reading, and the default-off Experimental toggle is the
+  only thing still holding that line. The structural guards are untouched — no `spo2Pct` write, no
+  gate input, `Interpreter.swift` prohibition and the `Whoop5HistoricalTests` tripwire both intact.
+- claim: the byte at `@82` is a strap-computed SpO2 percentage. NOT asserted by anything shipped —
+  the track is labelled "SpO₂ Candidate (raw)", carries no `%` suffix, writes no `spo2Pct`, and
+  feeds no gate. This entry exists because SHOWING a number invites a reader to believe it, and the
+  belief is the thing that is unvalidated.
+- needs: nights where the `@82` in-band series can be compared against an independent oximeter
+  ON A PER-TIMESTAMP BASIS. The nightly-mean route is CLOSED, not merely unfinished: the only
+  reference available on this machine (Apple Health `metricSeries` key `spo2`) has SD **0.430** over
+  31 days (range 96.08-97.76), so there is no variance to correlate against and r would be
+  meaningless. Only the ~3.9-point constant offset would show, which proves nothing about tracking.
+- blocked-because: 🟡 PARTIAL EVIDENCE, CONTRADICTORY ACROSS DEVICES. An 8-night independent
+  validation tracked at corr +0.99 against the WHOOP app, but two nights on the original #103 device
+  moved OPPOSITE — device/firmware variance still unresolved. A third strap now adds one clean
+  night (2026-08-19→20, WHOOP 5.0): 22 duty windows of exactly 30 samples spaced exactly 1200 s,
+  355 in-band readings, mean 93.07 / median 94 / range 72-100, against an Apple Health reference of
+  96.08 for the same night. One night is not validation, and the reference is a DIFFERENT SENSOR:
+  the SpO2 in Apple Health here is written by a RingConn Gen 2 via OpenCircuit, which NOOP files
+  under a generic `apple-health` / "Apple Watch" device row. An Apple Watch Series 6 is also paired
+  and writes `OxygenSaturation`, and `AppleHealthAggregator` does not filter by `sourceName`, so the
+  daily figure may be a two-sensor blend.
+- check: two steps, in order. (1) SOURCE PURITY AND CADENCE — export from the Health app
+  (profile → Export All Health Data) and parse `export.xml` read-only for `Record` rows of type
+  `OxygenSaturation`: report the `sourceName` distribution, the median inter-sample interval, and
+  the count of RingConn records landing inside the `@82` duty windows at ±30 s and ±60 s.
+  `Packages/StrandImport/.../AppleHealthImporter.swift` already parses these with `startDate` and
+  `sourceName`. (2) ONLY IF that count is non-trivial — pull the store
+  (`xcrun devicectl device copy from --device 00008150-000E434E3AD8401C --domain-type
+  appDataContainer --domain-identifier com.bly.noop --source "Library/Application
+  Support/OpenWhoop/whoop.sqlite" …`, plus `-wal`/`-shm`) and run
+  `Tools/linux-capture/validate_spo2_candidate.py` for the `@82` side, which auto-detects the duty
+  cycle rather than assuming it.
+- passes-if: across ≥5 nights and ≥200 matched pairs, the paired per-timestamp comparison holds
+  r ≥ 0.7 with MAE ≤ 2.5 points after removing a constant per-device offset, AND the sign of the
+  correlation is consistent on every night. Anything that reproduces the split seen on the #103
+  device — nights of opposite sign — settles this as NOT PROMOTABLE and the toggle stays the
+  ceiling. Promotion additionally requires clearing the standing prohibition in `Interpreter.swift`
+  and the `Whoop5HistoricalTests` tripwire, which are deliberate and must be removed knowingly.
+- check-after: 2026-09-20
+
 ### Duplicate R-R ingest: the historical-wins rule has never run against a real night
 - id: rr-historical-authority
 - shipped: branch `fix/rr-duplicate-ingest` 2026-08-19 (#1451) — `WhoopStore.insertHistorical` +

@@ -1799,6 +1799,7 @@
         <item quantity="other">%1$d workouts</item>
     </plurals>
     <string name="timeline_spo2_not_on_whoop5">This strap doesn\'t send SpO₂ over Bluetooth. Import a WHOOP export or Health Connect to see it.</string>
+    <string name="timeline_spo2_candidate_sparse">The strap only banks this during sleep, in short bursts every ~20 minutes.</string>
     <string name="timeline_resp_not_on_whoop5">This strap sends no raw respiration stream. Your estimated respiratory rate appears on the Health screen.</string>
     <string name="settings_disclosure_expanded">Expanded</string>
     <string name="settings_disclosure_collapsed">Collapsed</string>

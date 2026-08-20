@@ -106,6 +106,16 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
     // 4.0-v24 never flashes the wrong message before the async reads resolve.
     var isWhoop5 by remember { mutableStateOf(false) }
     var everSpo2 by remember { mutableStateOf(true) }
+    // #103: true when the ONE SpO2 track is fed by the raw @82 candidate rather than a 4.0's red/IR
+    // ratio — i.e. the strap never banked an spo2Sample and the Experimental toggle is on. Drives the
+    // NUMBER FORMAT (a whole byte vs a two-decimal ratio) and the empty-state copy.
+    //
+    // It deliberately does NOT change the label any more: the track reads "SpO2" whichever source feeds
+    // it, by explicit owner decision. The default-off Experimental toggle is the only thing still
+    // separating the unvalidated @82 byte from a calibrated reading — see docs/PENDING_VALIDATION.md
+    // [spo2-candidate-82-timeline]. Twin of Swift FullDayChartView.spo2IsCandidate.
+    val spo2CandidateDisplay = NoopPrefs.spo2CandidateDisplay(LocalContext.current)
+    val spo2IsCandidate = spo2CandidateDisplay && !everSpo2
     var everResp by remember { mutableStateOf(true) }
     LaunchedEffect(deviceId) {
         val d = runCatching { vm.pairedDevices() }.getOrDefault(emptyList())
@@ -174,7 +184,7 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
     }
 
     // Re-read on metric / source / settled-window / fresh-data change. The DB read picks raw vs buckets.
-    LaunchedEffect(metric, ownedOnly, visible.first, visible.last, recentDays) {
+    LaunchedEffect(metric, ownedOnly, visible.first, visible.last, recentDays, spo2CandidateDisplay) {
         // PERF (#scroll-jank): a pinch/pan reports a NEW window on every gesture frame, each of which
         // re-keys this effect and previously fired a fresh Room query mid-gesture (heavy, on every
         // frame). Debounce by sleeping first: while the window is still moving, the next frame re-keys
@@ -191,7 +201,7 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
         val bucket = timelineBucketSeconds(to - from, targetPoints = 600)
         bucketSeconds = bucket
         isRaw = bucket <= 1L
-        points = readTimeline(vm, deviceId, metric, from, to, bucket)
+        points = readTimeline(vm, deviceId, metric, from, to, bucket, spo2CandidateDisplay)
         loading = false
     }
 
@@ -255,7 +265,7 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
                             style = NoopType.footnote, color = Palette.textTertiary)
                     }
                     displayPoints.lastOrNull()?.let {
-                        Text(formatValue(metric, it.value) + unitSuffix(metric, tempUnit),
+                        Text(formatValue(metric, it.value, spo2IsCandidate) + unitSuffix(metric, tempUnit),
                             style = NoopType.bodyNumber, color = Palette.textPrimary)
                     }
                 }
@@ -272,7 +282,7 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
                                 TimelineMetric.Respiration -> !everResp
                                 else -> false
                             }
-                            EmptyTimelineState(metric, ownedOnly, metricUnsupported)
+                            EmptyTimelineState(metric, ownedOnly, metricUnsupported, spo2IsCandidate)
                         }
                         else -> TimelineChart(
                             points = displayPoints,
@@ -289,9 +299,9 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
                 if (displayPoints.isNotEmpty()) {
                     val vals = displayPoints.map { it.value }
                     Row(modifier = Modifier.fillMaxWidth()) {
-                        TimelineStat(stringResource(R.string.timeline_min), formatValue(metric, vals.minOrNull() ?: 0.0), Modifier.weight(1f))
-                        TimelineStat(stringResource(R.string.timeline_avg), formatValue(metric, vals.average()), Modifier.weight(1f))
-                        TimelineStat(stringResource(R.string.timeline_max), formatValue(metric, vals.maxOrNull() ?: 0.0), Modifier.weight(1f))
+                        TimelineStat(stringResource(R.string.timeline_min), formatValue(metric, vals.minOrNull() ?: 0.0, spo2IsCandidate), Modifier.weight(1f))
+                        TimelineStat(stringResource(R.string.timeline_avg), formatValue(metric, vals.average(), spo2IsCandidate), Modifier.weight(1f))
+                        TimelineStat(stringResource(R.string.timeline_max), formatValue(metric, vals.maxOrNull() ?: 0.0, spo2IsCandidate), Modifier.weight(1f))
                     }
                 }
             }
@@ -317,7 +327,8 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
 }
 
 @Composable
-private fun EmptyTimelineState(metric: TimelineMetric, ownedOnly: Boolean, metricUnsupported: Boolean) {
+private fun EmptyTimelineState(metric: TimelineMetric, ownedOnly: Boolean, metricUnsupported: Boolean,
+                               spo2IsCandidate: Boolean) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -331,6 +342,11 @@ private fun EmptyTimelineState(metric: TimelineMetric, ownedOnly: Boolean, metri
         // estimate surfaces. [metricUnsupported] already folds in the family + never-produced + ownedOnly
         // gate, so a 4.0-v24 with data on other days keeps the generic message.
         val reason = when {
+            // #103: once the candidate is the source, an empty window is the NORMAL daytime answer — the
+            // strap banks @82 only during sleep, in ~30 s bursts every ~20 min — so say that instead of
+            // the "doesn't send SpO2 over Bluetooth" copy, which is about the red/IR a 5/MG truly lacks.
+            metric == TimelineMetric.Spo2 && spo2IsCandidate ->
+                stringResource(R.string.timeline_spo2_candidate_sparse)
             metricUnsupported && metric == TimelineMetric.Spo2 ->
                 stringResource(R.string.timeline_spo2_not_on_whoop5)
             metricUnsupported && metric == TimelineMetric.Respiration ->
@@ -361,6 +377,9 @@ private suspend fun readTimeline(
     from: Long,
     to: Long,
     bucket: Long,
+    /// #103: gates the raw @82 fallback inside the single SpO2 track. Passed in rather than read here
+    /// because this runs off the main dispatcher, where there is no Compose context.
+    spo2CandidateDisplay: Boolean,
 ): List<TimelinePoint> = withContext(Dispatchers.Default) {
     // PERF parity with macOS Repository.timelineSeries: the Room reads already hop to Room's executor,
     // but this function is called from a LaunchedEffect (Main), so the post-read mapping + downsample
@@ -396,9 +415,37 @@ private suspend fun readTimeline(
                 .let { HrvAnalyzer.rollingRmssd(it, windowSec = hrvWindow, stepSec = maxOf(1, hrvWindow / 8)) }
                 .map { (ts, v) -> TimelinePoint(ts, v) }
         }
-        TimelineMetric.Spo2 ->
-            runCatching { repo.spo2Samples(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
+        // ONE SpO2 track, two possible sources — the strap decides which, because no strap produces both.
+        // A WHOOP 4.0 banks raw red/IR (v24 @68/@70) and gets the honest unitless ratio proxy (#166: no
+        // calibrated %). A 5/MG banks NEITHER, so spo2Sample stays empty for it forever; its only
+        // SpO2-shaped signal is the @82 candidate byte. Two separate pills would put a permanently-empty
+        // "SpO2" beside a populated one on every 5/MG. Source selection is DATA-DRIVEN, not
+        // family-flagged, so a legacy bare-"WHOOP" 4.0 (#171) still gets its real ratio.
+        // Twin of Swift Repository.timelineRawMetric `.spo2`.
+        TimelineMetric.Spo2 -> {
+            val ratio = runCatching { repo.spo2Samples(deviceId, from, to, 200_000) }
+                .getOrDefault(emptyList())
                 .mapNotNull { if (it.ir > 0) TimelinePoint(it.ts, it.red.toDouble() / it.ir) else null }
+            if (ratio.isNotEmpty()) ratio
+            // #103 instrumentation ONLY — never a shipped SpO2 metric and never a gate input, per the
+            // standing prohibition where `spo2_candidate_82` is emitted in the decoder. Behind the
+            // default-off Experimental toggle, and the UI relabels the track "candidate (raw)" whenever
+            // this path supplies the points, so the byte is never read as a percentage.
+            //
+            // Gated to 70..100, the SAME in-band window the decoder and
+            // AnalyticsEngine.nightlySpo2CandidateMean apply: a nonzero value under 70 is a diagnostic
+            // code and a bit-7 value is a saturation sentinel, so plotting either would draw a line that
+            // is not a percentage of anything. `0` is the duty cycle's off-phase, not a reading.
+            //
+            // Sparse BY NATURE, not by failure: ~30 consecutive seconds every ~20 minutes, sleep only.
+            else if (!spo2CandidateDisplay) emptyList()
+            else runCatching { repo.v18AuxSamples(deviceId, from, to, 200_000) }
+                .getOrDefault(emptyList())
+                .mapNotNull { a ->
+                    val v = a.auxByte82
+                    if (v != null && v in 70..100) TimelinePoint(a.ts, v.toDouble()) else null
+                }
+        }
         TimelineMetric.SkinTemp -> {
             // #938: family-aware raw→°C — 5/MG centidegrees (raw/100, #156), a WHOOP 4.0 v24 raw ADC map.
             // The registry-model-label → family mapping lives in DeviceFamily.forRegistryDevice (#171).
@@ -487,12 +534,16 @@ private fun unitSuffix(metric: TimelineMetric, tempUnit: TemperatureUnit): Strin
     else -> ""
 }
 
-private fun formatValue(metric: TimelineMetric, v: Double): String = when (metric) {
+private fun formatValue(metric: TimelineMetric, v: Double, spo2IsCandidate: Boolean): String = when (metric) {
     TimelineMetric.Hr, TimelineMetric.Respiration, TimelineMetric.Hrv, TimelineMetric.Movement -> v.toInt().toString()
     // `v` already arrives in the displayed unit — callers read from `displayPoints`, which converts skin
     // temp to °F upfront so the chart's axis (plotted from the same points) agrees with this readout (#101).
     TimelineMetric.SkinTemp -> String.format(Locale.US, "%.1f", v)
-    TimelineMetric.Spo2, TimelineMetric.Motion -> String.format(Locale.US, "%.2f", v)
+    // The @82 candidate is a whole byte in 70..100 — an integer. The 4.0 red/IR ratio is a small
+    // unitless fraction and keeps its two decimals. Same pill, so the format follows the source (#103).
+    TimelineMetric.Spo2 ->
+        if (spo2IsCandidate) Math.round(v).toInt().toString() else String.format(Locale.US, "%.2f", v)
+    TimelineMetric.Motion -> String.format(Locale.US, "%.2f", v)
     // #175: name the band's own state at the nearest code so the readout reads "asleep", not "2.0". A
     // bucket-averaged fractional value (when zoomed out) rounds to the nearest code — honest for a readout
     // label; the track itself plots the numeric code. Names the BAND's reported state, never a derived stage.

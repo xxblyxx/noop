@@ -143,6 +143,58 @@ final class DeepTimelineFacadeTests: XCTestCase {
         XCTAssertEqual(series.points.count, 120)
     }
 
+    /// #103: the raw `@82` candidate track plots ONLY the 70...100 in-band values — the same window the
+    /// decoder and `AnalyticsEngine.nightlySpo2CandidateMean` apply. A nonzero byte under 70 is a
+    /// diagnostic code and a bit-7 byte is a saturation sentinel; plotting either would draw a line that
+    /// is not a percentage of anything, and `0` is the duty cycle's off-phase, not a reading. This is the
+    /// tripwire for anyone widening the filter — the sentinels are REAL values on a real night (a WHOOP 5
+    /// overnight banked 0, 32, 128, 144 and 160 beside the in-band 92-96), not hypothetical.
+    @MainActor
+    func testSpo2CandidateTrackKeepsOnlyInBandBytes() async throws {
+        let store = try await WhoopStore.inMemory()
+        let dev = "my-whoop"
+        try await store.upsertDevice(id: dev, mac: nil, name: "WHOOP")
+        let base = 1_780_000_000
+        // Four in-band readings interleaved with every out-of-band class the strap actually emits.
+        let bytes = [0, 93, 32, 94, 128, 96, 160, 92, 16, 2]
+        let aux = bytes.enumerated().map { V18AuxSample(ts: base + $0.offset, auxByte82: $0.element) }
+        try await store.insert(Streams(v18Aux: aux), deviceId: dev)
+
+        let repo = Repository(deviceId: dev)
+        repo.setStoreForTesting(store)
+
+        // The test host IS the app, so this is the real user domain — save and restore rather than
+        // removing, or running the suite would silently clear the wearer's own toggle.
+        let saved = UserDefaults.standard.object(forKey: PuffinExperiment.spo2CandidateDisplayKey)
+        defer { UserDefaults.standard.set(saved, forKey: PuffinExperiment.spo2CandidateDisplayKey) }
+        UserDefaults.standard.set(true, forKey: PuffinExperiment.spo2CandidateDisplayKey)
+        let series = await repo.timelineSeries(metric: .spo2,
+                                               from: base, to: base + 60, targetPoints: 600)
+        XCTAssertEqual(series.points.map { $0.value }, [93, 94, 96, 92],
+                       "only the 70...100 bytes may reach the chart, in ts order")
+    }
+
+    /// The `@82` fallback is reachable ONLY behind the Experimental toggle. With it off, a 5/MG's SpO₂
+    /// track must stay empty rather than quietly showing an unvalidated byte under the "SpO₂" label.
+    @MainActor
+    func testSpo2CandidateStaysHiddenWhileToggleIsOff() async throws {
+        let store = try await WhoopStore.inMemory()
+        let dev = "my-whoop"
+        try await store.upsertDevice(id: dev, mac: nil, name: "WHOOP")
+        let base = 1_780_000_000
+        let aux = (0..<10).map { V18AuxSample(ts: base + $0, auxByte82: 95) }
+        try await store.insert(Streams(v18Aux: aux), deviceId: dev)
+
+        let repo = Repository(deviceId: dev)
+        repo.setStoreForTesting(store)
+
+        let saved = UserDefaults.standard.object(forKey: PuffinExperiment.spo2CandidateDisplayKey)
+        defer { UserDefaults.standard.set(saved, forKey: PuffinExperiment.spo2CandidateDisplayKey) }
+        UserDefaults.standard.set(false, forKey: PuffinExperiment.spo2CandidateDisplayKey)
+        let series = await repo.timelineSeries(metric: .spo2, from: base, to: base + 60, targetPoints: 600)
+        XCTAssertTrue(series.points.isEmpty, "@82 must not surface while the Experimental toggle is off")
+    }
+
     /// A PPG-ONLY day (no measured hrSample, only ppgHrSample) must NOT render empty — the #156 COALESCE
     /// surfaces the PPG-derived series on BOTH the zoomed-in raw path and the day-scale bucket path.
     @MainActor

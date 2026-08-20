@@ -1755,6 +1755,7 @@
         <item quantity="other">%1$d treningu</item>
     </plurals>
     <string name="timeline_spo2_not_on_whoop5">Ten pasek nie wysyła SpO₂ przez Bluetooth. Zaimportuj eksport WHOOP lub Health Connect, aby go zobaczyć.</string>
+    <string name="timeline_spo2_candidate_sparse">Pasek zapisuje to tylko podczas snu, w krótkich seriach co ok. 20 minut.</string>
     <string name="timeline_resp_not_on_whoop5">Ten pasek nie wysyła surowego strumienia oddechowego. Szacowana częstość oddechów pojawi się na ekranie Zdrowie.</string>
     <string name="settings_disclosure_expanded">Rozszerzony</string>
     <string name="settings_disclosure_collapsed">Zwinięty</string>

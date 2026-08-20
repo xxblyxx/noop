@@ -1790,6 +1790,7 @@
         <item quantity="other">%1$d Workouts</item>
     </plurals>
     <string name="timeline_spo2_not_on_whoop5">Dieses Band sendet kein SpO₂ über Bluetooth. Importiere einen WHOOP-Export oder Health Connect, um es zu sehen.</string>
+    <string name="timeline_spo2_candidate_sparse">Das Band speichert dies nur im Schlaf, in kurzen Schüben alle ~20 Minuten.</string>
     <string name="timeline_resp_not_on_whoop5">Dieses Band sendet keinen Rohdaten-Atemstrom. Deine geschätzte Atemfrequenz erscheint im Health-Bildschirm.</string>
     <string name="settings_disclosure_expanded">Erweitert</string>
     <string name="settings_disclosure_collapsed">Reduziert</string>

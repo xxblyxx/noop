@@ -1751,6 +1751,7 @@
         <item quantity="other">%1$d treinos</item>
     </plurals>
     <string name="timeline_spo2_not_on_whoop5">Esta bracelete não envia SpO₂ por Bluetooth. Importe uma exportação WHOOP ou Health Connect para a ver.</string>
+    <string name="timeline_spo2_candidate_sparse">A pulseira só regista isto durante o sono, em rajadas curtas a cada ~20 minutos.</string>
     <string name="timeline_resp_not_on_whoop5">Esta bracelete não envia qualquer fluxo respiratório bruto. A tua frequência respiratória estimada aparece no ecrã Saúde.</string>
     <string name="l10n_data_sources_screen_last_shared_6bf8389c">"Última partilha "</string>
     <string name="l10n_data_sources_screen_sharing_paused_health_connect_permission_was_e8950315">Partilha pausada: a permissão do Health Connect foi revogada. Toca para conceder novamente.</string>

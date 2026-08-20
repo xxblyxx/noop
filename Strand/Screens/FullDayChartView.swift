@@ -48,6 +48,20 @@ struct FullDayChartView: View {
     /// "Owned only" hides empty non-strap rows; "All sources" surfaces the disclosure (#574). The strap is
     /// always the owned source, so this currently scopes the empty-state copy rather than swapping reads.
     @State private var ownedOnly = true
+    /// #103: the Experimental "Blood Oxygen: strap estimate" toggle also governs whether the raw `@82`
+    /// candidate track is offered here. Read as `@AppStorage` (not `PuffinExperiment.…Enabled`) so
+    /// flipping it in Settings adds/removes the pill live instead of on the next screen open.
+    @AppStorage(PuffinExperiment.spo2CandidateDisplayKey) private var spo2CandidateDisplayEnabled = false
+    /// #103: true when the ONE SpO₂ track is being fed by the raw `@82` candidate rather than a WHOOP
+    /// 4.0's red/IR ratio — i.e. the strap has never banked an `spo2Sample` and the Experimental toggle
+    /// is on. Drives the NUMBER FORMAT (a whole byte vs a two-decimal ratio) and the empty-state copy.
+    ///
+    /// It deliberately does NOT change the label any more: the track reads "SpO₂" whichever source
+    /// feeds it, by explicit owner decision. Nothing on screen therefore separates the unvalidated @82
+    /// byte from a calibrated reading — the only thing still holding that line is the default-off
+    /// Experimental toggle. See `docs/PENDING_VALIDATION.md` [spo2-candidate-82-timeline]; the entry
+    /// records that this is unvalidated and that a night measured 93.1 against a 96.1 reference.
+    @State private var spo2IsCandidate = false
     /// #623: true when the current SpO2/respiration metric is genuinely unsupported on the active strap —
     /// a 5.0-family strap that has NEVER produced it (4.0-only wire signals) — vs merely an empty window.
     @State private var metricUnsupported = false
@@ -93,6 +107,9 @@ struct FullDayChartView: View {
         .task(id: annotationKey) { await reloadAnnotations() }
         .task { await landOnLatestDayIfNeeded() }
         .task(id: metric) { await resolveMetricUnsupported() }   // #623
+        // #103: which source is feeding the single SpO₂ track — re-resolved when the toggle flips so
+        // the label and number format follow it live.
+        .task(id: spo2SourceKey) { await resolveSpo2IsCandidate() }
     }
 
     /// #623: a SpO2/respiration track is "unsupported on this strap" only when it's a 5.0-family strap that
@@ -102,6 +119,18 @@ struct FullDayChartView: View {
     /// The family test must be a positive "is it a 5/MG" (#1086), never a coalesced one: the respiration
     /// copy tells the reader their estimate is on the Health screen, which is true for a WHOOP 5 (the R-R
     /// RSA estimate runs) and false for a non-WHOOP device whose banked stream that estimate refuses.
+    private var spo2SourceKey: String { "\(spo2CandidateDisplayEnabled)|\(repo.refreshSeq)" }
+
+    /// A strap banks red/IR or it banks `@82`, never both — so "has it ever produced an `spo2Sample`"
+    /// is the honest test for which source the track is showing, and it reuses the existing #623
+    /// existence probe rather than adding a second one.
+    private func resolveSpo2IsCandidate() async {
+        // Short-circuited deliberately: `&&` is an autoclosure and cannot carry the async probe, and
+        // skipping the store read when the toggle is off is the cheaper order anyway.
+        guard spo2CandidateDisplayEnabled else { spo2IsCandidate = false; return }
+        spo2IsCandidate = !(await repo.strapHasEverProduced(.spo2))
+    }
+
     private func resolveMetricUnsupported() async {
         guard repo.activeStrapIsWhoop5(), metric == .spo2 || metric == .respiration else {
             metricUnsupported = false
@@ -309,6 +338,12 @@ struct FullDayChartView: View {
         if ownedOnly, metricUnsupported, metric == .spo2 {
             return String(localized: "This strap doesn’t send SpO₂ over Bluetooth. Import a WHOOP export or Health Connect to see it.")
         }
+        // #103: once the candidate is the source, an empty window is the NORMAL daytime answer — the
+        // strap banks @82 only during sleep, in ~30 s bursts every ~20 min — so say that instead of the
+        // "doesn't send SpO₂ over Bluetooth" copy, which is about the red/IR the 5/MG genuinely lacks.
+        if metric == .spo2, spo2IsCandidate {
+            return String(localized: "The strap only banks this during sleep, in short bursts every ~20 minutes.")
+        }
         if ownedOnly, metricUnsupported, metric == .respiration {
             return String(localized: "This strap sends no raw respiration stream. Your estimated respiratory rate appears on the Health screen.")
         }
@@ -439,6 +474,7 @@ struct FullDayChartView: View {
         case .motion: return " g"
         // Seconds of movement per ~30 s window (the ring's OWN 0x47 activity), so tag it "s".
         case .ouraMovement: return " s"
+        // The @82 candidate is a RAW BYTE, not a percentage — no "%" suffix, deliberately (#103).
         case .spo2, .bandSleepState: return ""
         }
     }
@@ -449,7 +485,10 @@ struct FullDayChartView: View {
         // `v` already arrives in the displayed unit — callers read from `displayPoints`, which converts
         // skin temp to °F upfront so the chart's own axis (plotted from the same points) agrees. (#101)
         case .skinTemp: return String(format: "%.1f", v)
-        case .spo2, .motion: return String(format: "%.2f", v)
+        // The @82 candidate is a whole byte in 70...100 — an integer. The 4.0 red/IR ratio is a small
+        // unitless fraction and keeps its two decimals. Same pill, so the format follows the source.
+        case .spo2: return spo2IsCandidate ? String(Int(v.rounded())) : String(format: "%.2f", v)
+        case .motion: return String(format: "%.2f", v)
         // #175: name the band's own state at the nearest code so the readout reads "asleep", not "2.0".
         case .bandSleepState: return Self.bandStateLabel(v)
         }
