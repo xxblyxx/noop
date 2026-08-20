@@ -121,3 +121,10 @@ tools/linux-capture/captures/
 
 # Personal WHOOP exports and other local scratch — never committed.
 tmp/
+
+# Local test/validation artifacts written by the qa-runner subagent and by hand-run checks.
+# Never committed: a strap log carries HR, timeline, the serial and the MAC — the same class of
+# data Fixtures/ and tmp/ are ignored for. Ignoring the whole directory is deliberate; the blanket
+# `*.log` rule above would otherwise swallow validation/*.log silently while tracking everything
+# else in there, which is the surprising half of that behaviour.
+validation/
