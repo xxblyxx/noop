@@ -602,6 +602,17 @@ Sleep, Trends, Stress, Workouts, Compare, Insights, Metric Explorer, Data Source
 re-expressed as a Compose theme — colors come from `Theme.NOOP`, never hardcoded. When extending the
 UI, keep that parity.
 
+**The `mutate {}` recomposition idiom.** Several screens hold UI state in a mutable holder rather
+than replacing it wholesale, and bump a recomposition counter inside a `mutate {}` block to signal
+the change to Compose. Compose does not observe in-place edits to a non-`State` object, so mutating
+such state *without* going through `mutate {}` produces a silent no-op: the data changes and the
+screen does not. When you edit one of these screens, follow the surrounding idiom rather than
+introducing a parallel state mechanism.
+
+**Flavors.** The app builds two: `Full` (the real client) and `Demo` (sample data, every screen
+reachable with no strap, build-from-source only). Profile and preference values live in
+`SharedPreferences`; everything durable lives in Room.
+
 ---
 
 ## Permissions and the no-internet posture

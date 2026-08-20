@@ -90,6 +90,28 @@ helper in `StrandAnalytics` + a Kotlin twin, both wired into each platform's `In
 **#131** (local-LLM AI Coach) — a provider abstraction added on both; **#140** (journal curation) —
 shared model + per-client edit UI. Each is "one idea, ported deliberately."
 
+## The enforceable parity rules
+
+The playbook above is *how* a feature gets ported; these are the rules a change is **checked**
+against. Each exists because a violation once produced a real divergence.
+
+- **Analytics and stored data must be byte-identical across Swift and Kotlin.** Change a decoder, an
+  analytics formula, a migration, or a stored value on one platform and the twin changes **in the
+  same commit** — or the commit message says explicitly why not. "It's Compose vs SwiftUI" is not a
+  license to let the numbers diverge.
+- **UI parity is feature-level, not pixel-level.** SwiftUI Charts and Compose Canvas legitimately
+  render differently; the *behavior* and the *data* must not.
+- **Cross-platform hashes and dedup keys must use a platform-neutral algorithm** — e.g. FNV-1a over
+  UTF-16 code units. Never Swift `hashValue` (randomized per process) or Kotlin `hashCode` for any
+  value that crosses the `.noopbak` boundary.
+- **The `.noopbak` backup whitelist is a byte-identical contract.** `BackupSettings.swift`
+  (`Packages/WhoopStore`) and `BackupSettingsCodec` (`android/…/data/BackupSettings.kt`) must carry the
+  same canonical keys and the same JSON kinds. Only `Int` / `Double` / `String` cross the wire — no
+  dates, no objects.
+- **Room and GRDB migrations must agree on the resulting schema.** Column order in a Room
+  `CREATE TABLE` must match the entity field order, and migrations are pinned with tests on both
+  sides. See [`CONTRIBUTING.md` → "Add a database column or table"](CONTRIBUTING.md).
+
 ## What is *not* shared (and why that's fine)
 
 - **No KMP / shared binary with Android** — see the parity rationale above.

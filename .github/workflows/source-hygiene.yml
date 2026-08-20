@@ -7,7 +7,7 @@
 # It recurs because it is a side effect of editing by INSERTION rather than in place. #846 fixed
 # three sites in one day, one of which #842 had introduced that same morning, and the block that
 # came adrift was "Byte-parity twin of Swift classifyCoverage" — a parity-contract statement, and
-# parity is the #1 rule in CLAUDE.md. Losing that note is not a cosmetic problem.
+# parity is the #1 rule (docs/CROSS_PLATFORM.md). Losing that note is not a cosmetic problem.
 #
 # Pure Python + git, no Xcode/Gradle: runs in seconds on ubuntu-latest, independent of the
 # disabled-by-default app-build.yml / android.yml compile jobs. Same shape as i18n-coverage.yml.

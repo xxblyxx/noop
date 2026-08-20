@@ -86,6 +86,28 @@ brew install xcodegen
 The packages themselves only need a Swift toolchain — they build and test with plain `swift build`
 / `swift test`, no Xcode project required.
 
+### Full toolchain matrix (Swift, Android, Linux)
+
+Versions are pinned by the repo — install these before the build loops below.
+
+- **Swift toolchain ≥ 5.9** — the pure packages declare `swift-tools-version: 5.9`; a 6.x toolchain
+  builds them. On macOS this ships with Xcode (also required for the app targets); on Linux use a
+  swift.org toolchain.
+- **JDK 17** — Android + Gradle (`sourceCompatibility` / `jvmTarget` are 17 in
+  `android/app/build.gradle.kts`). Gradle **8.7** is provisioned by `android/gradlew`; do not install
+  a system Gradle.
+- **Android SDK** — `platform-tools`, `platforms;android-34`, `build-tools;34.0.0` (match
+  `compileSdk` / build-tools in `android/app/build.gradle.kts`). Point Gradle at it via
+  `android/local.properties` (`sdk.dir=…`, gitignored) or `$ANDROID_HOME`.
+- **Linux system packages** — a swift.org toolchain tarball does not bundle its build/runtime deps.
+  Install `build-essential libc6-dev` for the C runtime and crt objects the linker needs; without
+  them `swift build` fails at link with `cannot find Scrt1.o … -lc`. Plus `libncurses-dev libxml2
+  libcurl4 zlib1g-dev libedit2 pkg-config unzip`.
+- **Android build-tools on non-x86-64 Linux (e.g. arm64)** — Google ships `aapt2` and `d8` as
+  **x86-64 only**, so resource processing dies with `aapt2 … Syntax error` / `Exec format error` on an
+  arm64 host unless x86 emulation is present. Install `qemu-user-static binfmt-support` and the
+  kernel runs them transparently. macOS and x86-64 Linux are unaffected.
+
 ---
 
 ## macOS build & run (reference implementation)
@@ -290,6 +312,28 @@ Gradle sync, and run on a device with Bluetooth (an emulator cannot reach a phys
 
 > The macOS app remains the reference implementation; the shared packages define the protocol,
 > storage, analytics, and import behavior every client matches.
+
+### When the Android toolchain is not installed
+
+A machine with only the Apple toolchain — no JRE, no Android SDK, no `android/local.properties` —
+cannot run `./gradlew testFullDebugUnitTest` or `compileFullDebugKotlin` at all. Since `android.yml`
+is disabled by default, a Kotlin twin can otherwise land with *nothing* having compiled it.
+
+This does **not** waive the [parity contract](CROSS_PLATFORM.md) — the twin still gets written. It
+changes how the work is *reported* and *checked*:
+
+- **Say so plainly in the commit message.** "Swift side tested via `swift test`; Kotlin twin written
+  but not compiled locally — no Android toolchain on this machine." Never imply the Kotlin was run.
+- **Dispatch `android.yml` on demand** (it has `workflow_dispatch`) so the twin gets a real
+  `assembleFullDebug` + `testFullDebugUnitTest` before it is trusted. That is the only actual
+  verification available for Kotlin on such a machine.
+- **Lean on the shared JSON oracles**, which *are* checked from the Swift side by the active
+  `swift-packages.yml`: `schema_oracle.json`, `decoder_oracle.json` and `r20_optical_oracle.json` are
+  each committed twice and byte-compared against the `android/` copy, so a fixture that drifts fails
+  on macOS with no Android tooling present.
+- Installing the toolchain is a one-time fix if Kotlin work becomes frequent: JDK 17 plus the SDK
+  packages listed under [Prerequisites](#full-toolchain-matrix-swift-android-linux), then point
+  Gradle at it via `android/local.properties`.
 
 ---
 

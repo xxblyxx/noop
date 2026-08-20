@@ -297,8 +297,8 @@ Stated so the list is not read as "the 5.0 is the crippled generation":
 
 ## Working rules for anything on this list
 
-From [`CLAUDE.md`](../CLAUDE.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md), repeated because every item
-above touches at least one of them:
+From [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CROSS_PLATFORM.md`](CROSS_PLATFORM.md), repeated
+because every item above touches at least one of them:
 
 - **One concern per PR.** A decode change, a migration and a UI change do not travel together.
 - **Parity is not optional.** A decoder, formula or stored-value change on one platform changes its

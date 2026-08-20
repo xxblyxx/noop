@@ -211,6 +211,12 @@ python3 -m unittest -v                     # framing/reassembly tests (stdlib on
 Capturing from a real strap on Linux is documented in
 [`../Tools/linux-capture/README.md`](../Tools/linux-capture/README.md).
 
+**What will *not* build on Linux.** Only the pure packages (`WhoopProtocol`, `OuraProtocol`,
+`PolarProtocol`) build and test there. Every GRDB-linked package — `WhoopStore`, `StrandImport`,
+`StrandAnalytics` (via `WhoopStore`) and `NoopLocalAccess` — fails with `sqlite3.h not found` from
+GRDB's CSQLite, and `StrandDesign` needs SwiftUI. All of those need **macOS**. Android JVM unit
+tests, by contrast, *do* run on Linux.
+
 ### macOS app
 
 The Xcode project is **generated**, not committed. `project.yml` is the source of truth; re-run
@@ -337,6 +343,11 @@ then used. Screens stay thin; the system stays canonical.
 - **Public API is intentional.** `public` only what a consumer package or the app actually needs.
   Internal helpers stay internal. Types crossing concurrency boundaries are `Sendable` where it makes
   sense (e.g. `DeviceFamily`, `AnalyticsEngine.ProfileBaselines`).
+- **Resolve a strap model through the one canonical resolver.** Map a registry `model` label to a
+  family with `DeviceFamily.forRegistryModel` (it exists on both platforms) — never an ad-hoc string
+  compare. The pairing wizard stores `"4.0"` while other paths store `"WHOOP 4.0"`, so a
+  single-spelling check silently misses straps. Reads must thread the registry's **active** strap id,
+  not a raw BLE address.
 - **Document the "why", and cite sources.** Protocol and analytics code carries comments that explain
   *where a fact came from* — e.g. `crc16Modbus` is annotated "Ported verbatim from the Goose
   reverse-engineering"; the safe command list cites the upstream `CommandNumber` table; analyzers
@@ -420,6 +431,14 @@ realtime-raw flood that dominated flash). Treat it as stable infrastructure:
 - **Verify on real hardware.** Anything that changes what bytes go out, or when, must be tested
   against an actual strap and the result noted in the PR. The existing comments do exactly this
   (e.g. "Verified on-device: 2.1/s → 0/s, and it persists across reconnect").
+
+### 4. Protocol facts live in the decoders, not in app code
+
+**No hardcoded hex frame bytes in the app layer.** A literal frame pasted into `Strand/`,
+`StrandiOS/` or `android/…/ui` is a protocol fact that no test covers and no other platform can see.
+Opcodes, offsets, and payload shapes belong in the decoders and in
+`WhoopProtocol/Resources/whoop_protocol.json`, where both platforms read the same value and the
+oracle fixtures pin it. The app calls a named command; it does not spell one.
 
 > The decode core (`WhoopProtocol`) and the router (`FrameRouter`) are pure and unit-tested, so you
 > can iterate on parsing and routing logic with `swift test` and captured frames *without* a strap.
@@ -506,6 +525,10 @@ Schema lives in `Packages/WhoopStore/Sources/WhoopStore/Database.swift` as a **v
   add metric caches (`sleepSession`, `dailyMetric`, `metricSeries`), cursors, and more. Follow the
   same shape and naming.
 - Add a `MigrationTests` case proving the migration applies cleanly on top of the prior version.
+- **Watch for data-loss traps.** Window-wide deletes and backfill rewrites can discard rows a user
+  can never recover — the strap does not keep a second copy. Prefer additive and transactional
+  changes; if a migration must remove or rewrite data, say so in the commit message and prove the
+  bound with a test.
 - **Update `schema_oracle.json` in the same PR.** Room (Android) and GRDB (iOS) must agree on the
   resulting schema, and that agreement is pinned by a shared fixture committed in two byte-identical
   copies (`Packages/WhoopStore/Tests/WhoopStoreTests/Resources/` and `android/app/src/test/resources/`).
@@ -521,6 +544,25 @@ Schema lives in `Packages/WhoopStore/Sources/WhoopStore/Database.swift` as a **v
   and applies them in registration order, so two open PRs that both add a `v31` produce two migrations
   claiming one number (and an exact name collision makes GRDB silently skip the second body). The
   oracle test asserts the numbers run 1…N with no gaps or repeats: renumber when you rebase.
+
+### Derive a physiological signal from raw sensor data
+
+**Validate against the artifact, not against one match.** The WHOOP optical and motion buffers are
+fixed-N-samples-per-record, so autocorrelation and spectral methods can manufacture a peak at the
+*record period* that looks physiological and coincidentally matches the WHOOP app on a stable night.
+That is why the PPG→HR estimate (#194) was withdrawn after it appeared to work.
+
+A single "matched WHOOP" night is **not** validation. Prove the method **tracks a varying input** —
+different subjects, or nights where the true value actually moves; for synthetic tests, recover
+*multiple* injected values, not one.
+
+Until it does, land the work as **instrumentation** (decode, store, and log the estimate beside the
+incumbent) or behind a **default-off Experimental toggle**. Never make it the default, and never let
+it feed a downstream gate such as recovery or illness detection, on thin evidence. This is the same
+boundary [`SCOPE.md`](SCOPE.md) draws for local rhythm instrumentation.
+
+WHOOP 4.0 motion is separately too sparse to reliably stage sleep or distinguish in-bed from
+out-of-bed — see #345 before building on it.
 
 ---
 
@@ -583,6 +625,26 @@ The three parts are independent counters, **not** decimals: `2.0.10` follows `2.
 "next number after `1.99`" — a new feature line is `2.1.0`, not `1.100`. The marketing version lives
 in `project.yml` (`MARKETING_VERSION`) and `android/app/build.gradle.kts` (`versionName`); the build
 numbers (`CFBundleVersion` / `versionCode`) increment independently on every release.
+
+### Release-note credits use GitHub handles (#736)
+
+In a release's contributor section, credit **third-party** work by `@handle`, not by display name. A
+plain name is invisible to GitHub — it neither notifies the contributor nor links to their profile. A
+display name may accompany the handle, but the handle is what makes the credit real:
+`Thanks to @tigercraft4 (Sleep/Health refactors), @digitalerdude (workout backfill), …`.
+
+- Credit both **merged PR authors** and the **issue reporters** whose reports drove a fix. A good bug
+  report with a strap log is often the harder half.
+- **Only third-party contributors.** The maintainer's own handles are left out: self-credit adds
+  noise and self-mentions notify nobody.
+- Collect the handles with **`Tools/release-contributors.sh <since-date|since-tag>`**, which lists
+  every third-party merged PR and every issue *closed as completed* in the range, plus a ready credit
+  line, with maintainer handles and bot accounts filtered out. A tag argument is bounded at that tag's
+  exact instant, so the previous release's work is not re-credited. Writing *what* each person
+  contributed is still by hand — that's the judgement part; hunting logins is not. Its output is a
+  work list to prune, not a finished line: a reporter whose issue is not worth calling out can be left
+  to the closing "everyone who filed the reports behind these fixes". `Tools/release.sh` warns when
+  the notes it is about to publish credit no `@handle`.
 
 ---
 

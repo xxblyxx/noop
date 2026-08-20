@@ -34,7 +34,8 @@ on-device from NOOP's own data and make no medical claim.
   curiosity is fine **only** as **default-off instrumentation** with explicit **non-diagnostic** wording
   — never an alert, never a health warning, never "possible arrhythmia" language, and never feeding a
   downstream gate. This mirrors the physiological-signal rule in
-  [CLAUDE.md](../CLAUDE.md): an unproven derivation lands as instrumentation, not a shipped feature.
+  [CONTRIBUTING.md](CONTRIBUTING.md#derive-a-physiological-signal-from-raw-sensor-data): an unproven
+  derivation lands as instrumentation, not a shipped feature.
 - **Local notifications from NOOP's own metrics** — charge, alarm, sync state — computed on-device.
 - **Local export / import / reporting** — your data leaves only when *you* export it.
 - **Offline insights and explainers** that need no cloud identity.
