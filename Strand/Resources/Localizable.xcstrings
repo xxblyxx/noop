@@ -207320,6 +207320,122 @@
           }
         }
       }
+    },
+    "Blood Oxygen (strap estimate)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Blutsauerstoff (Band-Schätzung)"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Oxígeno en sangre (estimación de la pulsera)"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Oxygène sanguin (estimation du bracelet)"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ossigeno nel sangue (stima del braccialetto)"
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tlen we krwi (szacunek opaski)"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Oxigénio no sangue (estimativa da pulseira)"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Кислород в крови (оценка браслета)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "血氧（设备估算）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "血氧（裝置估算）"
+          }
+        }
+      }
+    },
+    "The strap's own nightly SpO₂ estimate. Not a calibrated reading.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die nächtliche SpO₂-Schätzung des Bands selbst. Kein kalibrierter Messwert."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La estimación nocturna de SpO₂ de la propia pulsera. No es una lectura calibrada."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L'estimation nocturne de SpO₂ du bracelet lui-même. Ce n'est pas une mesure calibrée."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La stima notturna di SpO₂ del braccialetto stesso. Non è una lettura calibrata."
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nocne oszacowanie SpO₂ dokonane przez samą opaskę. To nie jest skalibrowany odczyt."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A estimativa noturna de SpO₂ da própria pulseira. Não é uma leitura calibrada."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Собственная ночная оценка SpO₂ от браслета. Это не калиброванное измерение."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备自身的夜间血氧估算值，并非校准读数。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "裝置自身的夜間血氧估算值，並非校準讀數。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -1150,7 +1150,14 @@ struct LiquidTodayView: View {
             ktile(String(localized: "Blood Oxygen"), icon: keyMetricIcon(metric), intText(spo2Shown), "%",
                   StrandPalette.metricCyan, fracOver(spo2Shown, 100),
                   // Draw the trend of whichever series is actually being shown.
-                  key: spo2 == nil && spo2CandidateDay != nil ? "spo2_candidate" : "spo2")
+                  key: spo2 == nil && spo2CandidateDay != nil ? "spo2_candidate" : "spo2",
+                  // ...and open the detail for that SAME series, so the number, its sparkline and the
+                  // chart the tap pushes all describe one thing. `spo2_candidate` is not in
+                  // `MetricCatalog.all` (it stays out of Explore), so the tile's bare-key lookup below
+                  // resolved to nil while the fallback was live and the tile went inert — the tap did
+                  // nothing. Routing to the calibrated `spo2` instead would open an empty chart on a 5/MG.
+                  detailMetric: MetricCatalog.todaySpo2Metric(hasCalibrated: spo2 != nil,
+                                                              hasCandidate: spo2CandidateDay != nil))
         case .respiratory:
             let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm ?? respDay?.respRateBpm
             ktile(String(localized: "Respiratory"), icon: keyMetricIcon(metric), resp.map { String(format: "%.1f", $0) } ?? "—", "rpm", StrandPalette.accent, fracOver(resp, 24), key: "resp_rate")

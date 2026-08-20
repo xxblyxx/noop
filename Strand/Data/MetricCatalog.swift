@@ -210,6 +210,18 @@ enum MetricCatalog {
         d("stress", String(localized: "Stress"), "Health", "/100", "xiaomi-band", "gauge.with.dots.needle.50percent", 0, false),
     ]
 
+    /// #103: the WHOOP 5/MG @82 nightly SpO₂ mean the Today Blood Oxygen tile falls back to when no
+    /// calibrated `spo2Pct` exists (that hardware never banks one — the v18 record carries no red/IR
+    /// pair). Deliberately NOT a member of `all`: it is an experimental, default-off signal, and keeping
+    /// it out of the catalog keeps it out of the Metric Explorer, Compare and the correlation scan for
+    /// everyone who never enabled the toggle. Reached only through `todaySpo2Metric` below, which the
+    /// tile hands to `MetricDetailView` directly (a closure NavigationLink needs no catalog lookup).
+    /// Titled apart from `spo2` on purpose — the `steps_est` precedent — so an unverified strap estimate
+    /// is never presented under the same name as a calibrated reading.
+    static let spo2CandidateMetric = d("spo2_candidate", String(localized: "Blood Oxygen (strap estimate)"),
+                                       "Charge", "%", "my-whoop", "drop", 0, true,
+                                       String(localized: "The strap's own nightly SpO₂ estimate. Not a calibrated reading."))
+
     static func inCategory(_ c: String) -> [MetricDescriptor] { all.filter { $0.category == c } }
 
     static func metric(key: String, source: String) -> MetricDescriptor? {
@@ -236,6 +248,17 @@ enum MetricCatalog {
         if hasImportedKcal { return metric(key: "active_kcal", source: "apple-health") }
         if hasOnDeviceKcal { return metric(key: "energy_kcal", source: "my-whoop") }
         return metric(key: "energy_kcal", source: "my-whoop")
+    }
+
+    /// #103: the SpO₂ twin of `todayStepsMetric` — route the tapped detail to the series the Today tile
+    /// is ACTUALLY showing. A WHOOP 5/MG has no calibrated `spo2Pct`, so the tile shows the @82 strap
+    /// estimate; opening the `spo2` detail there would draw a permanently empty chart. Falls back to the
+    /// calibrated descriptor when there is nothing to show at all, so a tile reading "—" keeps the
+    /// destination it has always had.
+    static func todaySpo2Metric(hasCalibrated: Bool, hasCandidate: Bool) -> MetricDescriptor? {
+        if hasCalibrated { return metric(key: "spo2", source: "my-whoop") }
+        if hasCandidate  { return spo2CandidateMetric }
+        return metric(key: "spo2", source: "my-whoop")
     }
 
     /// Localized display name for a catalog category, mapped AT THE RENDER SITE only. The
