@@ -648,6 +648,14 @@ final class AppModel: ObservableObject {
         let resolved = name.isEmpty ? WorkoutCatalog.defaultSportName : name
         let started = Date()
         activeWorkout = ActiveWorkout(start: started, sport: resolved)
+        // Arm realtime HR for the life of the WORKOUT, not the life of whichever screen happens to be
+        // showing it (#681-shaped): on a WHOOP 5/MG, live HR only flows while the puffin realtime stream
+        // is armed, and every other `startRealtimeHR()` caller is screen-scoped (LiveWorkoutView's
+        // sheet, the Live tab). Dismissing the sheet after Start used to drop the ref-count to zero and
+        // silently stop capturing samples — this call keeps it armed for as long as `activeWorkout` is
+        // non-nil, balanced by `stopRealtimeHR()` in `endWorkout()` below. Ref-counted, so a sheet opened
+        // over an already-armed workout still composes correctly (1→2→1, never disarms out from under it).
+        startRealtimeHR()
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -731,6 +739,10 @@ final class AppModel: ObservableObject {
         w.peakHr = snap.peakHr
         w.liveStrain = snap.liveStrain
         activeWorkout = w
+        // Same workout-scoped arm as `startWorkout()` — a relaunch that rehydrates a still-running
+        // session must re-establish the realtime-HR reference too, or it stays disarmed until some
+        // screen happens to open. Balanced by `stopRealtimeHR()` in `endWorkout()`.
+        startRealtimeHR()
     }
 
     /// Finish the active workout: finalize the GPS route (#524), score the captured HR window, and save it
@@ -739,6 +751,11 @@ final class AppModel: ObservableObject {
     func endWorkout() {
         guard let w = activeWorkout else { return }
         activeWorkout = nil
+        // Release the workout-scoped realtime-HR reference taken in `startWorkout()` /
+        // `rehydrateActiveWorkout()`. Deliberately before the discard guard below returns, so both the
+        // saved and the too-short-to-save path release exactly once (ref-counted + clamped at 0, so an
+        // imbalance can't wedge the stream off for any surface still open, e.g. the Live tab).
+        stopRealtimeHR()
         let wasGps = activeWorkoutIsGps
         activeWorkoutIsGps = false
         // Drop the durable snapshot the instant the session ends , whether it saves below or is discarded
