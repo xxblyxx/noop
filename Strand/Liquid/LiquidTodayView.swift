@@ -54,6 +54,10 @@ struct LiquidTodayView: View {
     @State private var vo2max: Double?             // exploreSeries("vo2max_est").last (#1391)
     @State private var vitality: Double?           // exploreSeries("vitality").last
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
+    /// #103: the WHOOP 5/MG `@82` nightly candidate mean for the SELECTED day, day-keyed like `stepsEst`.
+    /// The Blood Oxygen tile's fallback when no calibrated `spo2Pct` exists — which on a 5/MG is always,
+    /// since the v18 layout carries no red/IR pair. nil unless the Experimental toggle is on.
+    @State private var spo2CandidateDay: Double?
     @State private var importedStepsDay: Int?      // Apple Health steps for the selected day (middle tier)
     @State private var importedActiveKcalDay: Double?  // #616: Apple Health active energy for the day (calorie fallback)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
@@ -1133,8 +1137,20 @@ struct LiquidTodayView: View {
         case .restingHr:
             ktile(String(localized: "Rest HR"), icon: keyMetricIcon(metric), intText(rhr), "bpm", StrandPalette.metricRose, fracOver(rhr, 100), key: "rhr")
         case .bloodOxygen:
+            // #103: a WHOOP 5/MG never banks a calibrated `spo2Pct` — the v18 record carries no red/IR
+            // pair — so this tile read "–%" forever on that hardware while the strap's own @82 nightly
+            // mean sat unused. Fall back to it when no calibrated value exists. `spo2CandidateDay` is
+            // already nil unless the Experimental toggle is on, so this needs no second gate.
+            //
+            // First-party by design: the fallback is the STRAP's own number, never Apple Health's
+            // imported percentage, even though that is calibrated and often present. See CLAUDE.md.
+            // The classic TodayView has this fallback; this Liquid variant was missing it.
             let spo2 = displayDay?.spo2Pct ?? vitalsDay?.spo2Pct
-            ktile(String(localized: "Blood Oxygen"), icon: keyMetricIcon(metric), intText(spo2), "%", StrandPalette.metricCyan, fracOver(spo2, 100), key: "spo2")
+            let spo2Shown = spo2 ?? spo2CandidateDay
+            ktile(String(localized: "Blood Oxygen"), icon: keyMetricIcon(metric), intText(spo2Shown), "%",
+                  StrandPalette.metricCyan, fracOver(spo2Shown, 100),
+                  // Draw the trend of whichever series is actually being shown.
+                  key: spo2 == nil && spo2CandidateDay != nil ? "spo2_candidate" : "spo2")
         case .respiratory:
             let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm ?? respDay?.respRateBpm
             ktile(String(localized: "Respiratory"), icon: keyMetricIcon(metric), resp.map { String(format: "%.1f", $0) } ?? "—", "rpm", StrandPalette.accent, fracOver(resp, 24), key: "resp_rate")
@@ -1365,6 +1381,9 @@ struct LiquidTodayView: View {
         async let vo2A = repo.exploreSeries(key: "vo2max_est", source: "my-whoop")
         async let vitA = repo.exploreSeries(key: "vitality", source: "my-whoop")
         async let stepsA = repo.exploreSeries(key: "steps_est", source: "my-whoop")
+        // #103: "spo2_candidate" is written under the computed "-noop" id; exploreSeries unions that
+        // sibling for source "my-whoop", so this reads it without naming the computed id here.
+        async let spo2CandA = repo.exploreSeries(key: "spo2_candidate", source: "my-whoop")
         async let appleA = repo.appleDailyRows()
         async let hrA = repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
         async let wkA = repo.workoutRows()
@@ -1418,12 +1437,17 @@ struct LiquidTodayView: View {
         for r in sparkRows { if let k = r.activeKcalEst { winOnDeviceKcal[r.day] = k } }
         let energyKcalSpark: [(String, Double)] = Set(winImportedKcal.keys).union(winOnDeviceKcal.keys).sorted()
             .compactMap { day in (winImportedKcal[day] ?? winOnDeviceKcal[day]).map { (day, $0) } }
+        let spo2CandSeries = await spo2CandA
         kSparks = [
             "recovery": sparkRows.compactMap { r in r.recovery.map { (r.day, $0) } },
             "strain": sparkRows.compactMap { r in r.strain.map { (r.day, $0) } },
             "hrv": sparkRows.compactMap { r in r.avgHrv.map { (r.day, $0) } },
             "rhr": sparkRows.compactMap { r in r.restingHr.map { (r.day, Double($0)) } },
             "spo2": sparkRows.compactMap { r in r.spo2Pct.map { (r.day, $0) } },
+            // #103: the @82 candidate's OWN trend, so a 5/MG tile falling back to it draws the series it
+            // is actually showing instead of the empty calibrated one.
+            "spo2_candidate": spo2CandSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
+                .map { ($0.day, $0.value) },
             "resp_rate": sparkRows.compactMap { r in r.respRateBpm.map { (r.day, $0) } },
             "steps": sparkRows.compactMap { r in r.steps.map { (r.day, Double($0)) } },
             // #616: the Calories tile drew no trend line — this dict had no matching entry, so windowedSpark
@@ -1444,6 +1468,15 @@ struct LiquidTodayView: View {
         // Steps is a DAILY metric, so key it to the SELECTED day (like restScore above), not the history-wide
         // latest. Without this, swiping to a past day with no strap step count showed today's estimate (the
         // `.last` value) instead of that day's. Mirrors the classic Today's stepsEstByDay[selectedDayKey].
+        // #103: day-key the @82 candidate the same way, so swiping to a past night shows THAT night's
+        // mean rather than the latest one. Gated here rather than at the tile so the state is simply nil
+        // when the Experimental toggle is off.
+        if PuffinExperiment.spo2CandidateDisplayEnabled {
+            let byDay = Dictionary(spo2CandSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+            spo2CandidateDay = byDay[selectedDayKey]
+        } else {
+            spo2CandidateDay = nil
+        }
         let stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         stepsEst = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
         // Imported Apple Health steps for the SELECTED day (max across rows), the middle tier between the
