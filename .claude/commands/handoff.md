@@ -1,7 +1,7 @@
 ---
 description: Write a handoff file for the current phase and stop
 argument-hint: [plan-slug]
-allowed-tools: Write, Read, Glob, Bash(git status:*), Bash(git diff:*), Bash(date:*)
+allowed-tools: Write, Read, Glob, Bash(git status:*), Bash(git status *), Bash(git diff:*), Bash(git diff *), Bash(date:*), Bash(date *)
 ---
 Write `docs/superpowers/handoff/<today>-$ARGUMENTS-handoff.md` following
 `docs/superpowers/TEMPLATE-handoff.md`, filling every section from this session's actual work

@@ -1,6 +1,6 @@
 ---
 description: Update the repo map after a phase
-allowed-tools: Read, Edit, Glob, Bash(git diff:*), Bash(git status:*)
+allowed-tools: Read, Edit, Glob, Bash(git diff:*), Bash(git diff *), Bash(git status:*), Bash(git status *)
 ---
 From this session's changes (`git diff`), update `REPO_MAP.md` **only if the structure actually
 changed** — a new top-level directory, a new package, a moved or renamed entry point. Keep it under
