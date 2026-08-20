@@ -2,267 +2,86 @@
 
 ## ⛔ THIS FORK IS PRIVATE — NEVER CONTACT UPSTREAM. HIGHEST PRIORITY RULE.
 
-**Nothing from this tree ever leaves it.** This fork's work stays local to the maintainer. No
-exceptions, no "just this once", and no asking whether an exception applies.
+**Nothing from this tree ever leaves it.** No exceptions, no "just this once", no asking whether an
+exception applies. Forbidden however helpful it looks: pull requests to `ryanbr/noop` or any other
+remote; issue comments, replies, reactions or new issues upstream — including posting a measurement,
+a correction, or a capture; any `gh` / `git push` / `curl` / API call that **writes** to a repo other
+than `xxblyxx/noop` (reading upstream is fine); sending findings off this machine by gist, forum,
+Discord or email.
 
-Specifically forbidden, whether or not it looks helpful:
-- **No pull requests** to `ryanbr/noop` or any other upstream/remote repo.
-- **No issue comments, replies, reactions, or new issues** upstream — including posting a
-  measurement, a correction, a census line, or a capture, however clearly it would help.
-- **No `gh` (or `git push`, `curl`, API) command that writes to any repo other than
-  `xxblyxx/noop`.** Reading upstream is fine; writing is not.
-- **No sending findings anywhere off this machine** — no gists, no forums, no Discord, no email.
+When a task seems to call for it — an issue's premise is wrong, a doc says "post this on #NNNN" —
+record the finding **locally** and stop. Do not offer posting as an option and do not ask permission;
+the answer is already no. Issue numbers here are local references, never destinations.
 
-When a task seems to call for it (an issue's premise is wrong, a gap list asks for a number to be
-posted, a doc says "post this on #NNNN"), record the finding **locally** — in the repo's docs, a
-commit message, or a file — and stop there. Do not offer posting upstream as an option, and do not
-ask for permission to; the answer is already no. Issue numbers in this tree are references for
-tracking work locally, never destinations.
+**Subagents do not load this file.** Restate this rule in every subagent prompt that can run `Bash`.
 
+## What this is
 
-Guidance for working in this tree — the maintainer, and any AI agent acting on their behalf. Work
-lands as **direct commits to `main`**; there is no external contributor flow and no review queue, so
-"open a PR" is not a step here. This is the high-signal map;
-[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) is the full guide (BLE safety contract, design-system
-rules, add-a-metric/screen/command recipes), [`docs/BUILD.md`](docs/BUILD.md) covers signing/pairing,
-and [`docs/IOS.md`](docs/IOS.md) covers the iOS target. Read this first; follow the links for depth.
-Those docs are written for upstream's public contributor workflow — read them for the technical
-depth, not for process.
+NOOP is a **fully offline, on-device** companion app for WHOOP 4.0 and 5.0/MG straps (Oura and Polar
+are experimental, gated). No server, no account, no cloud sync, no telemetry, and the project stays
+anonymous. Clean-room interoperability only. A change is out of scope if it sends data off-device,
+phones home, or adds firmware / decompiled code / WHOOP assets — see
+[`docs/SCOPE.md`](docs/SCOPE.md).
 
-**Hardware on hand:** the maintainer's own strap is a **WHOOP 5.0**, so that is the device any
-"can you check / try this" is run against, and the family to assume when a report or question does
-not name one. Anything 4.0-specific (e.g. the sparse 4.0 motion buffer behind #345) cannot be
-verified here without a borrowed strap — say so rather than claiming it was tested.
+**Work lands as direct commits to `main`.** There is no contributor flow and no review queue here, so
+"open a PR" is not a step. The `docs/` guides are written for upstream's public workflow — read them
+for technical depth, not for process.
 
-## What NOOP is (and the hard scope limits)
+**Hardware on hand: a WHOOP 5.0.** That is what any "can you check this" runs against, and the family
+to assume when a question doesn't name one. Anything 4.0-specific cannot be verified here — say so
+rather than claiming it was tested.
 
-NOOP is a **fully offline, on-device** companion app for WHOOP 4.0 and 5.0/MG straps (with
-**experimental** Oura support in the tree — gated behind `ExperimentalBrand`, not a shipped supported
-strap). It pairs over Bluetooth, stores everything in on-device SQLite, and computes recovery / strain
-/ HRV / sleep locally. There is **no server, no account, no cloud sync, no telemetry**, and the project stays
-**anonymous** (iOS/Android ship build-from-source / sideload, not via the App Store).
+See @REPO_MAP.md for structure.
 
-These are hard constraints, not preferences. A change is out of scope if it:
-- adds a server, account, cloud sync, or sends any data off-device;
-- adds analytics/telemetry/crash-reporting that phones home;
-- adds WHOOP firmware, decompiled app code, logos/assets, or any DRM circumvention. NOOP is
-  **clean-room interoperability** with hardware the user owns — keep it that way. (That bars
-  *implementations* and literals, not every fact learned from one: a protocol offset may be
-  re-derived with attribution as an unvalidated candidate — see the "facts vs code" bullet in
-  [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) before ruling it out.)
+## Token rules
 
-Licensing: the repo is under [PolyForm Noncommercial 1.0.0](LICENSE), inherited from upstream.
-Anything written here is covered by it — nothing to agree to, but the noncommercial terms still bind.
+1. Delegate codebase search to the Explore subagent; don't read files into the main context
+   speculatively. Explore skips this file, so restate any constraint it needs — including the
+   never-scan list in `REPO_MAP.md`.
+2. Never scan the whole repo. Read the smallest viable file set before planning.
+3. Use plan mode for anything touching more than one file.
+4. Stay inside the active plan's boundary (`docs/superpowers/plans/`). If a dependency forces you
+   out, stop and say why before proceeding.
+5. Run tests via the qa-runner subagent — don't dump verbose output into the main context.
+6. After changes, `/wrapup`: update `REPO_MAP.md` if the structure changed.
+7. When context fills, write `docs/superpowers/handoff/…`, then stop.
+8. Ship complete work — no stubs, placeholders, or half-wired code. Instrumentation and a
+   default-off Experimental toggle are complete work, not stubs; see the physiological-signal rule.
+9. Prefer targeted patches over full-file rewrites unless full replacement is safer.
+10. A broad refactor needs a new plan file first — stop and write it.
 
-## Architecture at a glance
+## Read before you edit
 
-Core logic lives in **cross-platform Swift packages**; each platform is a thin app layer over them.
-The **macOS app is the reference implementation**; **Android is a full shipped app**; **iOS is a
-build-from-source target** folded into the same repo.
+These rules are **not** in this file. Load the doc before touching the area.
 
-| Layer | Path | What lives here |
-|---|---|---|
-| Protocol (pure) | `Packages/WhoopProtocol`, `Packages/OuraProtocol` | BLE frame parse, CRC, command/event/packet decode. **No CoreBluetooth.** Builds on Linux; also builds the `whoop-decode` CLI. |
-| Storage | `Packages/WhoopStore` | GRDB/SQLite persistence: migrations, streams, caches. |
-| Analytics (pure) | `Packages/StrandAnalytics` | HRV / recovery / strain / sleep / correlation math. Database-free. |
-| Import | `Packages/StrandImport` | WHOOP CSV + Apple Health importers. |
-| Design system | `Packages/StrandDesign` | SwiftUI palette / components / charts. |
-| macOS + shared app | `Strand/` (scheme **Strand**, product `NOOP`, macOS 13+) | `BLE/` (CoreBluetooth), `Collect/`, `Data/` (Repository), `Screens/`, `App/` (`RootView`/`ContentView` = sidebar shell). Shared with iOS where a file isn't macOS-only. |
-| iOS-only app | `StrandiOS/` (scheme **NOOPiOS**, iOS 17+), `StrandiOSShared/`, `StrandiOSWidgets/`, `NOOPWatch*` | `StrandiOSApp` (@main), `RootTabView` (the iOS tab shell — no macOS analogue), iOS widgets, watch app. |
-| Android app | `android/` (Kotlin, Compose, Room; flavors `Full`/`Demo`) | `com.noop.{ble,collect,data,ingest,analytics,protocol,ui,widget,…}` — mirrors the Swift layering with its own reimplementations. |
+| Touching | Read first |
+|---|---|
+| a decoder, an analytics formula, a migration, a stored value | [`docs/CROSS_PLATFORM.md`](docs/CROSS_PLATFORM.md) — the Kotlin twin ships in the **same commit** |
+| `Strand/BLE`, `Strand/Collect`, `com.noop.ble` | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) §BLE safety contract. Never add destructive writes. BLE cannot be CI-tested — validate on a real strap and say what you tested |
+| a schema change | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) §Add a database column or table (schema reference: [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md)) |
+| any UI | design tokens only — `StrandPalette` / `StrandFont` on Apple, `Palette` / `Metrics` on Android. No hardcoded colors, fonts, or spacing |
+| deriving a physiological signal from raw sensor data | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) §Derive a physiological signal — one matching night is **not** validation |
+| build, CI, or toolchain | [`docs/BUILD.md`](docs/BUILD.md) |
+| shipping a claim only future data can confirm | [`docs/PENDING_VALIDATION.md`](docs/PENDING_VALIDATION.md) — add an entry before calling the work done |
 
-`project.yml` is the **XcodeGen source of truth**; `Strand.xcodeproj/` is generated — never hand-edit
-or commit it. Re-run `xcodegen generate` after adding/removing files or editing `project.yml`.
+## The two traps
 
-**Where new code goes:** the more "wire-level" (bytes) or "math-level" a change is, the deeper into
-`Packages/` it belongs — and the more it must be covered by a `swift test` that runs with no app, no
-strap, no CoreBluetooth. Never add `import AppKit` / `import UIKit` / `import CoreBluetooth` under
-`Packages/`; guard framework code with `#if canImport(AppKit)` / `#elseif canImport(UIKit)`.
+- **`swift-packages.yml` does not compile the app targets**, and `app-build.yml` is disabled. Touch
+  anything under `Strand/`, `StrandiOS/`, `StrandiOSShared/`, `StrandiOSWidgets/` and **no default CI
+  validates it** — a compile error passes every green check. Build it yourself:
+  `xcodegen generate && xcodebuild … build`.
+- **Kotlin cannot be compiled on this machine** — no JDK, no Android SDK. Write the twin anyway, say
+  so plainly in the commit ("Kotlin twin written but not compiled locally"), and dispatch
+  `android.yml` to actually verify it. Never imply the Kotlin was run.
 
-## The cross-platform parity contract (the #1 rule)
+## Commits
 
-Android is an independent reimplementation of the same logic, **not** a port that shares code with
-Swift. So:
-
-- **Analytics and stored data must be byte-identical across Swift and Kotlin.** If you change a
-  decoder, an analytics formula, a migration, or a stored value on one platform, change the twin on
-  the other in the same commit (or explicitly call out why not). "It's Compose vs SwiftUI" is *not* a
-  license to let the numbers diverge.
-- **UI parity is feature-level, not pixel-level.** SwiftUI Charts vs Compose Canvas legitimately
-  differ; the *behavior* and the *data* must not.
-- **Cross-platform hashes/dedup keys must use a platform-neutral algorithm** (e.g. FNV-1a over UTF-16
-  code units) — never `hashValue` (Swift randomizes it) or Kotlin `hashCode` if the value crosses the
-  `.noopbak` boundary.
-- **The `.noopbak` backup whitelist is a byte-identical contract.** `BackupSettings.swift`
-  (`Packages/WhoopStore`) and `BackupSettingsCodec` (`android/…/data/BackupSettings.kt`) must carry
-  the same canonical keys + JSON kinds. Only Int/Double/String cross the wire — no dates/objects.
-- **Room (Android) and GRDB (iOS) migrations must agree** on the resulting schema. Column order in a
-  Room `CREATE TABLE` must match the entity field order; pin migrations with tests.
-
-## Build, test & CI — and what actually validates your change
-
-**This is the part people get wrong.** Know exactly what covers your change before you claim it works.
-
-### Prerequisites (toolchain & packages)
-Versions are pinned by the repo — install these before the loops below:
-- **JDK 17** — Android + Gradle (`sourceCompatibility`/`jvmTarget` are 17 in `android/app/build.gradle.kts`).
-  Gradle **8.7** is provisioned by `android/gradlew`; don't install a system Gradle.
-  **Not installed on the maintainer's machine** — see "Kotlin can't be verified here" below.
-- **Android SDK** — `platform-tools`, `platforms;android-34`, `build-tools;34.0.0` (match `compileSdk` /
-  build-tools in `android/app/build.gradle.kts`). Point Gradle at it via `android/local.properties`
-  (`sdk.dir=…`, gitignored) or `$ANDROID_HOME`.
-- **Swift toolchain ≥ 5.9** — the pure packages declare `swift-tools-version: 5.9`; a 6.x toolchain builds
-  them. On **macOS** this ships with Xcode (also required for the app targets); on **Linux** use a
-  swift.org toolchain.
-- **Linux system packages** (a swift.org toolchain tarball does not bundle its build/runtime deps):
-  `build-essential libc6-dev` — the C runtime / crt objects the linker needs; without them `swift build`
-  fails at link with `cannot find Scrt1.o … -lc`. Plus `libncurses-dev libxml2 libcurl4 zlib1g-dev
-  libedit2 pkg-config unzip`.
-- **Android build-tools on non-x86-64 Linux (e.g. arm64):** Google ships `aapt2` / `d8` as **x86-64 only**,
-  so resource processing dies with `aapt2 … Syntax error` / `Exec format error` on an arm64 host unless x86
-  emulation is present — install `qemu-user-static binfmt-support` and the kernel runs them transparently.
-  macOS and x86-64 Linux are unaffected.
-
-**Kotlin can't be verified on the maintainer's machine.** This machine has **no JRE, no Android SDK,
-and no `android/local.properties`** — only the Apple toolchain. So `./gradlew testFullDebugUnitTest`
-and `compileFullDebugKotlin` **cannot be run here**, and `android.yml` is disabled by default, which
-means a Kotlin twin can otherwise land with *nothing* having compiled it.
-
-This does **not** waive the parity contract above — the twin still gets written. It changes how the
-work is *reported* and *checked*:
-- **Say so plainly in the commit message.** "Swift side tested via `swift test`; Kotlin twin written
-  but not compiled locally — no Android toolchain on this machine." Never imply the Kotlin was run.
-- **Dispatch `android.yml` on demand** (it has `workflow_dispatch`) so the twin gets a real
-  `assembleFullDebug` + `testFullDebugUnitTest` before it is trusted. That is the only actual
-  verification available for Kotlin here.
-- **Lean on the shared JSON oracles**, which *are* checked by the active `swift-packages.yml` from the
-  Swift side: `schema_oracle.json`, `decoder_oracle.json`, `r20_optical_oracle.json` are each
-  committed twice and byte-compared against the `android/` copy, so a fixture that drifts fails on
-  macOS without any Android tooling.
-- Installing the toolchain is a one-time fix if Kotlin work gets frequent: JDK 17 + the SDK packages
-  listed above, then point Gradle at it via `android/local.properties`.
-
-### Fast local loops
-```bash
-# Swift packages (fastest; no Xcode, no strap):
-cd Packages/WhoopProtocol && swift build && swift test     # also OuraProtocol
-# Android JVM unit tests (no device) — NOT runnable on the maintainer's machine (no JDK/SDK):
-cd android && ./gradlew testFullDebugUnitTest              # add --tests "com.noop.…" to filter
-cd android && ./gradlew compileFullDebugKotlin             # compile the whole app module
-# macOS app (needs Xcode on macOS):
-xcodegen generate && xcodebuild -project Strand.xcodeproj -scheme Strand \
-  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
-```
-
-### What each CI job covers — and the gaps
-| Workflow | Covers | Runner | Default state |
-|---|---|---|---|
-| `swift-packages.yml` | `swift test` for **`Packages/**` only** (WhoopProtocol, WhoopStore, StrandAnalytics, StrandImport, StrandDesign, NoopLocalAccess) | macos-15 | **active** |
-| `app-build.yml` | **Compile-only** of the **app targets** (`Strand` macOS + `NOOPiOS` iOS). iOS leg needs **macos-26** (iOS 26 SDK / `glassEffect`). | macos-15 / macos-26 | **disabled** (on-demand) |
-| `android.yml` | `assembleFullDebug` + `testFullDebugUnitTest` | ubuntu | **disabled** — dispatch it; the maintainer's machine has no Android toolchain |
-| `fork-testing-build.yml` / `fork-release.yml` | Staging / release builds (apk + mac + ios) | — | on dispatch |
-
-**The trap:** `swift-packages` does **NOT** compile the app targets. So if you touch **app-target
-Swift** — anything under `Strand/`, `StrandiOS/`, `StrandiOSShared/`, `StrandiOSWidgets/` (Views,
-`AppModel`, `BLEManager`, `Repository`, `RootTabView`, widget publish, …) — **no default CI validates
-it**, because `app-build.yml` is disabled. A compile error there (e.g. `'self' used before all stored
-properties are initialized`) will pass every green check and still be broken. If you change app-target
-Swift, you MUST build the app yourself: `xcodebuild … build` locally, or run `app-build.yml` on demand.
-
-### Local walls (things that will *not* build where you expect)
-- **On Linux:** only `WhoopProtocol` / `OuraProtocol` (pure) build & test. Every GRDB-linked package —
-  `WhoopStore`, `StrandImport`, `StrandAnalytics` (via `WhoopStore`), and `NoopLocalAccess` — fails with
-  `sqlite3.h not found` (GRDB's CSQLite), and `StrandDesign` needs SwiftUI — all need **macOS**. Android
-  JVM unit tests **do** run on Linux.
-- **App targets** (`Strand`, `NOOPiOS`) need **Xcode on macOS**; there is no Linux/CI unit-test target
-  for them (`StrandTests` runs only under `xcodebuild … test` on macOS).
-- **BLE behavior cannot be CI- or Linux-tested.** Anything on the CoreBluetooth / offload / live-HR
-  path (`Strand/BLE`, `Strand/Collect`, Android `com.noop.ble`) must be **validated on a real strap**;
-  compile-success proves nothing about connection behavior. Say what you tested on hardware.
-
-## Hard rules before you touch these areas
-
-- **BLE (read [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) §BLE safety contract first):** never add
-  destructive/write commands to hardware; CRC-gate every inbound frame; keep the connection path
-  stable; no hardcoded hex frame bytes in app code — protocol facts live in the decoders/schema.
-- **Device / strap model resolution:** map a registry `model` label to a family through the ONE
-  canonical resolver (`DeviceFamily.forRegistryModel` on both platforms), never a scattered
-  string compare — the wizard stores `"4.0"`, other paths `"WHOOP 4.0"`, and single-spelling checks
-  silently miss straps. Reads must thread the registry's **active** strap id, not a raw BLE address.
-- **Design system is law:** UI uses only design tokens — `StrandPalette` / `StrandFont` / shared
-  components on Apple, `Palette` / `Metrics` on Android. No hardcoded colors, fonts, or spacing.
-- **Migrations:** add a versioned migration + a test; never mutate an existing migration. Watch for
-  data-loss traps (window-wide deletes, backfill rewrites) — prefer additive/transactional changes.
-- **Deriving a physiological signal from raw sensor data — validate against the artifact, not one
-  match:** the WHOOP optical/motion buffers are fixed-N-samples-per-record, so autocorrelation/spectral
-  methods can manufacture a peak at the record period that *looks* physiological and coincidentally
-  matches the WHOOP app on a stable night — that's why the PPG→HR estimate (#194) was withdrawn. A
-  single "matched WHOOP" night is **not** validation. Prove the method **tracks a varying input**
-  (different subjects, or nights where the true value moves; for synthetic tests, recover *multiple*
-  injected values, not one). Until it does, land it as **instrumentation** (decode + store + log the
-  estimate beside the incumbent) or behind a **default-off Experimental toggle** — never make it the
-  default or feed it a downstream gate (recovery, illness) on thin evidence. (WHOOP 4.0 motion is
-  separately too sparse to reliably stage sleep or tell in-bed from out-of-bed — see #345.)
-
-## iOS / Android specifics worth knowing
-
-- **iOS is `NOOPiOS`**, not `Strand`. `ContentView`/`RootView` (the macOS sidebar) are excluded from
-  iOS; the iOS shell is `RootTabView`. A file shared with macOS (`TodayView`, `Repository`, analytics)
-  must keep compiling for **both** — check the `Strand` (macOS) build too when you edit shared files.
-- **Android** is Compose + Room, flavors `Full` (real) and `Demo`. Profile/prefs live in
-  SharedPreferences; the DB is Room. UI state uses a `mutate {}` recomposition-counter idiom in places.
-- iOS/macOS deployment targets: macOS 13.0, iOS 17.0 (see `project.yml`).
-
-## Validating what we ship (`docs/PENDING_VALIDATION.md`)
-
-Some fixes here **cannot be checked when they land** — the strap produces the confirming data hours or
-nights later, and some of it only when the body, the phone's connection state, or the firmware happens
-to do the thing the code is watching for. That gap is how a fix quietly becomes folklore: carefully
-reasoned, tests green, never once observed working. A week later nobody remembers it was owed a check.
-
-- **Shipping something whose correctness rests on data that doesn't exist yet? Add an entry before
-  calling the work done.** The file's table lists the required fields; the load-bearing ones are
-  `needs` (the data event that must occur), `check` (the exact command), `passes-if` (decided *now*,
-  not after seeing the result), and `check-after` (earliest useful date).
-- A `SessionStart` hook (`.claude/settings.json` → `Tools/pending-validation.py`) surfaces ripe
-  entries at the start of every session. When it does: **ask whether to validate now.** Don't start
-  pulling data unprompted, and don't let it displace what the session is for.
-- Validated → move the entry to `## Settled` with what was actually observed. Data still absent →
-  bump `check-after`. Never delete an entry that was never checked.
-- Keep it to **claims awaiting evidence**. It is not a TODO list; ordinary follow-ups go in the
-  tracker. Once it fills with wishlist items the session-start reminder becomes wallpaper.
-- A missing or malformed `check-after` reads as **ripe**, on purpose — a typo must make noise rather
-  than bury an item forever. `Tools/pending-validation.py --list` prints every open entry by hand.
-
-## Commit conventions
-
-- **One concern per commit.** Keep a protocol change, a schema migration, and a UI change separate.
-- **Show your verification.** BLE → what you tested on hardware. Analytics → the method + a test.
-  UI → confirms design tokens only. App-target Swift → that you compiled the app (CI won't).
-- **Keep generated artifacts out of git** (`Strand.xcodeproj/`, `build/`, `.build/`, `*.app`,
-  DerivedData). Commit `project.yml`, not the generated project. `Package.resolved` is fine.
-- **Cross-platform:** if the change applies to both platforms, do both (or say why not).
-- **Versioning (SemVer):** bump `MARKETING_VERSION` in `project.yml` **and** `versionName` in
-  `android/app/build.gradle.kts` together; build numbers increment independently. The parts are
-  counters, not decimals (`2.0.10` follows `2.0.9`).
-- **Voice:** docs/comments are neutral, third-person, project-voice. Keep upstream credits intact.
-- **Release-note credits use GitHub handles (#736).** In a release's contributor section, credit
-  **third-party** work by `@handle`, not by display name — a plain name is invisible to GitHub, so it
-  neither notifies the contributor nor links to their profile. A display name may accompany the handle,
-  but the handle is what makes the credit real: `Thanks to @tigercraft4 (Sleep/Health refactors),
-  @digitalerdude (workout backfill), …`.
-  - Credit both **merged PR authors** and the **issue reporters** whose reports drove a fix — a good bug
-    report with a strap log is often the harder half.
-  - **Only third-party contributors.** The maintainer's own handles (`@ryanbr` / `@Fanboynz`) are left
-    out: self-credit adds noise and self-mentions notify nobody.
-  - Collect the handles with **`Tools/release-contributors.sh <since-date|since-tag>`**, which lists every
-    third-party merged PR and every issue *closed as completed* in the range, plus a ready credit line,
-    with the maintainer's own handles and bot accounts filtered out. A tag argument is bounded at that
-    tag's exact instant, so the previous release's work is not re-credited. Writing *what* each person
-    contributed is still by hand — that's the judgement part; hunting logins is not. Its output is a work
-    list to prune, not a finished line: a reporter whose issue is not worth calling out in the notes can
-    be left to the closing "everyone who filed the reports behind these fixes". `Tools/release.sh` warns
-    when the notes it is about to publish credit no `@handle`.
+One concern per commit — a protocol change, a migration, and a UI change stay separate. **Show your
+verification:** BLE → what you tested on hardware; analytics → the method and a test; app-target
+Swift → that you compiled the app, because CI won't. Never commit generated artifacts
+(`Strand.xcodeproj/`, `build/`, `.build/`, `*.app`). Bump `MARKETING_VERSION` in `project.yml` and
+`versionName` in `android/app/build.gradle.kts` together. Docs and comments are neutral,
+third-person, project-voice; keep upstream credits intact.
 
 When in doubt, prefer the smallest change that's correct and covered by a test that runs without a
 strap.
