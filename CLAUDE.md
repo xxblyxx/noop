@@ -189,6 +189,27 @@ Swift, you MUST build the app yourself: `xcodebuild … build` locally, or run `
   SharedPreferences; the DB is Room. UI state uses a `mutate {}` recomposition-counter idiom in places.
 - iOS/macOS deployment targets: macOS 13.0, iOS 17.0 (see `project.yml`).
 
+## Validating what we ship (`docs/PENDING_VALIDATION.md`)
+
+Some fixes here **cannot be checked when they land** — the strap produces the confirming data hours or
+nights later, and some of it only when the body, the phone's connection state, or the firmware happens
+to do the thing the code is watching for. That gap is how a fix quietly becomes folklore: carefully
+reasoned, tests green, never once observed working. A week later nobody remembers it was owed a check.
+
+- **Shipping something whose correctness rests on data that doesn't exist yet? Add an entry before
+  calling the work done.** The file's table lists the required fields; the load-bearing ones are
+  `needs` (the data event that must occur), `check` (the exact command), `passes-if` (decided *now*,
+  not after seeing the result), and `check-after` (earliest useful date).
+- A `SessionStart` hook (`.claude/settings.json` → `Tools/pending-validation.py`) surfaces ripe
+  entries at the start of every session. When it does: **ask whether to validate now.** Don't start
+  pulling data unprompted, and don't let it displace what the session is for.
+- Validated → move the entry to `## Settled` with what was actually observed. Data still absent →
+  bump `check-after`. Never delete an entry that was never checked.
+- Keep it to **claims awaiting evidence**. It is not a TODO list; ordinary follow-ups go in the
+  tracker. Once it fills with wishlist items the session-start reminder becomes wallpaper.
+- A missing or malformed `check-after` reads as **ripe**, on purpose — a typo must make noise rather
+  than bury an item forever. `Tools/pending-validation.py --list` prints every open entry by hand.
+
 ## PR & commit conventions
 
 - **One concern per PR.** Keep a protocol change, a schema migration, and a UI change separate.
