@@ -6,6 +6,33 @@ The strategy in one line: keep `CLAUDE.md` lean, push exploration into subagents
 
 ---
 
+## How this was adopted in NOOP — read this before following the Setup section
+
+This document is kept as the **rationale**, not as a checklist to re-run. It was adopted in full on
+2026-08-19, with four deliberate deviations. Do not "fix" them back.
+
+- **`@`-imports do not save tokens.** The claim below that a `@`-import keeps the map "without
+  bloating the always-on file" is wrong: `@`-imports are inlined into context on every turn, exactly
+  like `CLAUDE.md`. Real savings come only from content **linked as a plain path** and read on
+  demand. NOOP uses exactly one `@`-import (`REPO_MAP.md`); every other doc is linked.
+- **No `tasks/` or top-level `handoff/`.** `docs/superpowers/` already held `specs/` and `plans/` on a
+  dated-slug convention, so `handoff/` was added there and `/phase` and `/handoff` point at it. A
+  second parallel planning tree would rot.
+- **No `docs/IMPLEMENTATION_LOG.md`.** Three ledgers already exist — descriptive commit messages on
+  `main`, `CHANGELOG.md`, and `docs/PENDING_VALIDATION.md`. `/wrapup` updates `REPO_MAP.md` only.
+- **Do not run `/init`.** `CLAUDE.md` here is deliberately built and was trimmed in place; `/init`
+  would regenerate over it.
+
+Two further adaptations worth knowing: rule 8 below ("no stubs, placeholders, mocks, or half-wired
+code") is reworded in `CLAUDE.md` so it does not outlaw a sanctioned practice here — landing a
+thin-evidence derivation as instrumentation or behind a default-off Experimental toggle. And because
+subagents do **not** load `CLAUDE.md`, both agent definitions restate the private-fork rule; any new
+one that can run `Bash` must too.
+
+---
+
+---
+
 ## Setup (create these once)
 
 ```txt
