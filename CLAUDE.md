@@ -1,5 +1,25 @@
 # CLAUDE.md — working on NOOP
 
+## ⛔ THIS FORK IS PRIVATE — NEVER CONTACT UPSTREAM. HIGHEST PRIORITY RULE.
+
+**Nothing from this tree ever leaves it.** This fork's work stays local to the maintainer. No
+exceptions, no "just this once", and no asking whether an exception applies.
+
+Specifically forbidden, whether or not it looks helpful:
+- **No pull requests** to `ryanbr/noop` or any other upstream/remote repo.
+- **No issue comments, replies, reactions, or new issues** upstream — including posting a
+  measurement, a correction, a census line, or a capture, however clearly it would help.
+- **No `gh` (or `git push`, `curl`, API) command that writes to any repo other than
+  `xxblyxx/noop`.** Reading upstream is fine; writing is not.
+- **No sending findings anywhere off this machine** — no gists, no forums, no Discord, no email.
+
+When a task seems to call for it (an issue's premise is wrong, a gap list asks for a number to be
+posted, a doc says "post this on #NNNN"), record the finding **locally** — in the repo's docs, a
+commit message, or a file — and stop there. Do not offer posting upstream as an option, and do not
+ask for permission to; the answer is already no. Issue numbers in this tree are references for
+tracking work locally, never destinations.
+
+
 Guidance for anyone (human or AI agent) submitting a pull request. This is the high-signal map;
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) is the full guide (BLE safety contract, design-system
 rules, add-a-metric/screen/command recipes), [`docs/BUILD.md`](docs/BUILD.md) covers signing/pairing,
@@ -199,5 +219,5 @@ Swift, you MUST build the app yourself: `xcodebuild … build` locally, or run `
     be left to the closing "everyone who filed the reports behind these fixes". `Tools/release.sh` warns
     when the notes it is about to publish credit no `@handle`.
 
-When in doubt, open an issue to coordinate first, and prefer the smallest change that's correct and
-covered by a test that runs without a strap.
+When in doubt, prefer the smallest change that's correct and covered by a test that runs without a
+strap.

@@ -118,3 +118,6 @@ tools/linux-capture/*.db
 tools/linux-capture/*.db-wal
 tools/linux-capture/*.db-shm
 tools/linux-capture/captures/
+
+# Personal WHOOP exports and other local scratch — never committed.
+tmp/
