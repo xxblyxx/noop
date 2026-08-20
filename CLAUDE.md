@@ -90,6 +90,31 @@ See @REPO_MAP.md for structure.
 9. Prefer targeted patches over full-file rewrites unless full replacement is safer.
 10. A broad refactor needs a new plan file first — stop and write it.
 
+## Usage guard — know the budget *before* starting (`Tools/usage-guard.py`)
+
+Running out of plan usage halfway through a task is expensive in a specific way: the reasoning lives
+in a context that is about to become unusable, and the work has to be re-derived after the reset. The
+`usage-monitor` skill answers "check usage" — but only when asked, which is *after* committing to the
+work. So the number arrives unprompted instead:
+
+- **`SessionStart`** (`--mode session`) reports both windows every session. **Include the two numbers
+  in your first reply**, in one line, then get on with what the session is for.
+- **`UserPromptSubmit`** (`--mode prompt`) is silent until either window hits **80%**, then warns at
+  most once per 30 min. That silence is what keeps the warning worth reading.
+- At ≥80%: **say so before starting substantial work** and offer (a) proceed — fine for a small,
+  self-contained task, (b) a cheaper model for the rest of the window, (c) the `usage-monitor` skill,
+  which writes a resume doc to this project's memory dir and schedules an auto-resume agent for the
+  reset time. `--report` prints numbers and nothing else; only the skill writes the resume doc.
+- Numbers come from Anthropic's `/api/oauth/usage` (same source as `/usage`), cached in
+  `~/.claude/vscode-claude-status-cache.json` and refreshed at most every 15 min. That cache is
+  shared with Claude Code on purpose; the 30-minute throttle file (`~/.claude/noop-usage-guard.json`)
+  is per-project so a sibling fork's warning cannot silence this one. Never use `ccusage` — it
+  estimates against a guessed limit and won't match `/usage`.
+- Failures are reported, not swallowed (same rule as `pending-validation.py`): a guard that goes
+  quiet still gets trusted. Run `python3 Tools/usage-guard.py --report` to check it by hand.
+- Hooks and `.claude/settings.json` are read once at process start. `--resume` / `--continue` keeps
+  the original registry, so a change to either needs a genuinely new session to take effect.
+
 ## Read before you edit
 
 These rules are **not** in this file. Load the doc before touching the area.
