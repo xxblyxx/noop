@@ -20,10 +20,16 @@ share an object store, a pushed commit's SHA is reachable through the parent rep
 though it lands on no upstream branch and notifies nobody. Local commits leak nothing; **pushing is
 what publishes.** See "Commits" below — pushing is the owner's call, never an assumed step.
 
-Note the tension with "the project stays anonymous" below: commits here are authored as
-`xxblyxx <xxblyxx@gmail.com>`, and author name and email are permanent, world-readable metadata on
-any pushed commit. Anonymity in this tree therefore means *the shipped app carries no identity* — it
-has never meant the git history does. Do not treat a push as anonymous.
+Note the tension with "the project stays anonymous" below. That rule is **upstream's**, and it exists
+because upstream DISTRIBUTES: notarizing on macOS or publishing to Play needs a paid identity tied to
+a real person, which upstream will not attach to a clean-room protocol reimplementation — hence the
+un-notarized `.app`, the unsigned APK, and the self-signed `.ipa`.
+
+**It largely does not apply to this fork, which distributes nothing.** Builds here are signed with
+the owner's own paid team for one device, and commits are authored as `xxblyxx <xxblyxx@gmail.com>`.
+So do not claim anonymity for anything produced in this tree: neither the local build nor the git
+history is anonymous, and author metadata is permanent and world-readable on any pushed commit. The
+rule still binds where it bites — never publish a build or artifact from here under any identity.
 
 When a task seems to call for it — an issue's premise is wrong, a doc says "post this on #NNNN" —
 record the finding **locally** and stop. Do not offer posting as an option and do not ask permission;
