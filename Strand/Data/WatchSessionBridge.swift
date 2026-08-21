@@ -122,87 +122,34 @@ final class WatchSessionBridge: NSObject, ObservableObject {
             || last.scoreDay != next.scoreDay
     }
 
-    /// Build the snapshot off the app state. Pure read; no side effects. Split out so the wiring is easy
-    /// to follow and the calibrating logic sits in one place.
+    /// Build the snapshot off the app state. Pure read; no side effects. The composition is delegated to
+    /// the pure `compose` below so the honesty rules are unit-testable without an `AppModel`.
     static func buildSnapshot(from model: AppModel) async -> WatchScoreSnapshot {
-        // #911: anchor the way Today does, through the SHARED `Repository.widgetAnchor` the Home/Lock
-        // widget and the iOS Live Activity now also use, so the wrist, the widget, the Live Activity and
-        // Today always describe the same day. `Date()` is read here so the day rolls live as the phone
-        // republishes; the helper folds in the #304 pre-04:00 carve-out and the #547 future-day guard, and
-        // anchors on today's row (not "the most recent day with any recovery score") so it can't drift
-        // around the rollover. When today isn't scored yet it carries over the last STRICTLY-PRIOR scored
-        // day for the recovery side.
         let days = model.repo.days
         let now = Date()
-        let day = Repository.widgetAnchor(days: days, now: now)
-
-        // Rest (sleep_performance) for that same anchor day. exploreSeries merges imported + on-device,
-        // exactly like the Today Rest tile and the widget. The tail fallback (restSeries.last) is ONLY
-        // valid when the anchor day IS the local today: early in a fresh day today's Rest row may not
-        // exist yet, so we borrow the latest known value. For an anchor that is NOT today, borrowing the
-        // tail would surface a DIFFERENT day's Rest as this day's without any cal marker (the cross-day
-        // bug), so we leave it nil and let restCalibrating flag it honestly. #977: the tail is ALSO gated on
-        // freshness now — a live 5.0 whose sleep never scores used to push a weeks-old Rest to the watch
-        // forever; a stale tail falls through to nil so the watch shows its honest calibrating state. Mirrors
-        // TodayView.freshRestScore.
-        var restScore: Double?
-        if let day {
-            let restSeries = await model.repo.exploreSeries(key: "sleep_performance", source: model.deviceId)
-            let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-            let anchorIsToday = day.day == Repository.localDayKey(now)
-            restScore = TodayView.freshRestScore(
-                todayValue: restByDay[day.day], lastDay: restSeries.last?.day,
-                lastValue: restSeries.last?.value, isTodaySelected: anchorIsToday, todayKey: day.day)
-        }
-
-        // The honesty rule: a missing number that is genuinely mid-calibration is flagged so the watch
-        // shows a cal marker, not a dash that looks like an outage. We treat "no number for the anchor
-        // day" as calibrating only when there is at least some day data to calibrate FROM. With no day
-        // at all (a fresh, never-synced phone) the flags stay false and the watch shows its neutral
-        // "open NOOP on your iPhone" empty state instead of implying calibration is underway.
-        let hasAnyDay = day != nil
-        let charge = day?.recovery
-        let effort = day?.strain
-        let rest = restScore
-
-        let snap = WatchScoreSnapshot(
-            charge: charge,
-            chargeCalibrating: hasAnyDay && charge == nil,
-            effort: effort,
-            effortCalibrating: hasAnyDay && effort == nil,
-            rest: rest,
-            restCalibrating: hasAnyDay && rest == nil,
-            hr: model.bpm ?? model.live.heartRate,
-            sleepSummary: sleepSummary(for: day),
-            asOf: Date(),
-            // The day the scores are ABOUT (not when we built this), so the watch can label recency
-            // honestly ("Yesterday") even when the build is fresh. nil when there's no anchor day at all.
-            scoreDay: day?.day
-        )
-        return snap
-    }
-
-    /// A one line sleep summary for the glance, formatted on the phone (the watch never recomputes it).
-    /// "7h 12m · 81%" when both are present; just the duration or just the efficiency when only one is;
-    /// empty when neither is known (the watch then hides the line). Formatted through the app's string
-    /// catalog ("%lldh %lldm" / "%lld%%", the same keys the Sleep screens use) so the wrist shows the
-    /// phone's language, not hardcoded English.
-    static func sleepSummary(for day: DailyMetric?) -> String {
-        guard let day else { return "" }
-        var parts: [String] = []
-        if let mins = day.totalSleepMin, mins > 0 {
-            let h = Int(mins) / 60
-            let m = Int(mins) % 60
-            parts.append(String(localized: "\(h)h \(m)m"))
-        }
-        if let eff = day.efficiency, eff > 0 {
-            // efficiency is stored as a fraction in [0,1] in some paths and as a percent in others; the
-            // cached DailyMetric carries the percent-style value the Today tile reads, so render it as a
-            // whole percent and clamp defensively.
-            let pct = eff <= 1.0 ? eff * 100 : eff
-            parts.append(String(localized: "\(Int(pct.rounded()))%"))
-        }
-        return parts.joined(separator: " · ")
+        // Rest (sleep_performance) merged from imported + on-device, exactly like the Today Rest tile.
+        // Read UNCONDITIONALLY: it used to be nested inside `if let anchor`, so a phone with no scored
+        // recovery row blanked Rest for a reason that had nothing to do with Rest. Source stays
+        // `model.deviceId` (the wrist's long-standing choice) rather than the widget's literal "my-whoop".
+        let restSeries = await model.repo.exploreSeries(key: "sleep_performance", source: model.deviceId)
+        let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        // #911: the SHARED anchor still resolves the day CHARGE describes, so the wrist, the widget, the
+        // Live Activity and Today never disagree about it. Effort and Rest no longer ride on it — see
+        // `Repository.glanceFields` for the per-field rationale.
+        let fields = Repository.glanceFields(
+            days: days,
+            logicalKey: Repository.logicalDayKey(now),
+            localKey: Repository.localDayKey(now),
+            restByDay: restByDay,
+            restTail: restSeries.last.map { (day: $0.day, value: $0.value) })
+        return WatchGlance.compose(fields: fields,
+                       hasAnyData: !days.isEmpty,
+                       anchorDay: Repository.widgetAnchor(days: days, now: now),
+                       todayRow: Repository.resolveToday(days: days,
+                                                         logicalKey: Repository.logicalDayKey(now),
+                                                         localKey: Repository.localDayKey(now)),
+                       hr: model.bpm ?? model.live.heartRate,
+                       asOf: Date())
     }
 
     /// Push a snapshot to the watch via application context (latest-state) and mirror it into the shared
