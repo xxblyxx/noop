@@ -288,6 +288,13 @@ private struct LiveActivityDriver: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // Wire the controller's diagnostic sink once, so a failed `Activity.request` or an
+            // `areActivitiesEnabled == false` gate is visible in the Workouts & GPS test-mode export
+            // instead of silently swallowed (Phase 4 — the fix for the first on-device test producing
+            // no Live Activity at all with no way to tell why).
+            .onAppear { liveActivity.workoutsLog = { [weak model] line in
+                model?.live.append(log: line, domain: .workouts)
+            } }
             .onReceive(model.live.$heartRate) { _ in
                 // #911: anchor the Live Activity on the SAME shared `Repository.widgetAnchor` the
                 // Home/Lock widget and the watch snapshot use, so this fourth surface can't drift to a

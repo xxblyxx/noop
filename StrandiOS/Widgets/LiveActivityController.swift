@@ -28,6 +28,18 @@ final class LiveActivityController {
     /// instantiating this system bridge per tick is needless allocation. ActivityKit's auth status
     /// only changes via Settings, so caching for the controller's lifetime is safe.
     private let authInfo = ActivityAuthorizationInfo()
+
+    /// Diagnostic sink for the "first on-device test produced NO Live Activity, with no way to tell
+    /// why" gap: `Activity.request`'s `catch` below used to discard its error entirely, and nothing in
+    /// this file ever logged anything, so the app behaved identically whether ActivityKit was never
+    /// asked or was asked and silently refused. Routed into the EXISTING `.workouts` Test Centre
+    /// domain (not a new domain — no Kotlin-twin obligation) because this only matters during a
+    /// workout, mirroring how `AppModel` wires `repo.workoutsLog` / `gpsRecorder.workoutsLog`. Set from
+    /// `StrandiOSApp`; nil (and therefore inert) in previews/tests that construct this controller bare.
+    var workoutsLog: ((String) -> Void)?
+    /// Last `areActivitiesEnabled` value logged, so the gate at the top of `update()` logs once per
+    /// EDGE rather than once per ~1 Hz tick while the app sits disabled.
+    private var lastLoggedActivitiesEnabled: Bool?
     /// Synchronous gate against concurrent `Activity.request` calls. The `else` branch below is
     /// re-entered while the first request is still in flight (it hasn't assigned `self.activity`
     /// yet), so without this guard two close-together HR samples could both fire `Activity.request`
@@ -53,7 +65,12 @@ final class LiveActivityController {
     /// Throttled to ~once every 2 s so we stay well under the Live Activity update budget.
     func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil,
                workout: WorkoutActivityPayload? = nil) {
-        guard authInfo.areActivitiesEnabled else { return }
+        let enabled = authInfo.areActivitiesEnabled
+        if enabled != lastLoggedActivitiesEnabled {
+            lastLoggedActivitiesEnabled = enabled
+            logWorkouts("liveActivity: areActivitiesEnabled=\(enabled)")
+        }
+        guard enabled else { return }
 
         // Re-adopt an activity that outlived a previous app session. ActivityKit keeps Live Activities
         // alive across launches/relaunches, but a fresh controller starts with `activity == nil`, so
@@ -66,7 +83,10 @@ final class LiveActivityController {
         // User opt-out (#336): if the in-app toggle is off, never start — and end any activity that's
         // already showing (the user just turned it off; this fires on the next ~1 Hz HR tick).
         guard UnitPrefs.liveActivityEnabled() else {
-            if activity != nil { Task { await end() } }
+            if activity != nil {
+                logWorkouts("liveActivity: ending (in-app toggle off)")
+                Task { await end() }
+            }
             return
         }
 
@@ -77,6 +97,7 @@ final class LiveActivityController {
         // Screen down with it — `bpm` renders "—" instead (it's already nil from the call site whenever
         // `connected` is false), while TIME and Effort carry on.
         if !connected && workout == nil {
+            logWorkouts("liveActivity: ending (disconnected, no workout)")
             Task { await end() }
             return
         }
@@ -108,8 +129,14 @@ final class LiveActivityController {
                     pushType: nil
                 )
                 lastPush = Date()
+                logWorkouts("liveActivity: started workout=\(workout != nil)")
             } catch {
                 activity = nil
+                // This catch used to discard `error` entirely — the app behaved identically whether
+                // Activity.request was never called or was called and silently refused. Surfacing the
+                // description is the whole point of Phase 4: it's the one piece of evidence the first
+                // on-device test couldn't produce.
+                logWorkouts("liveActivity: Activity.request threw \(String(describing: error))")
             }
             isStarting = false
         }
@@ -123,6 +150,16 @@ final class LiveActivityController {
             await act.end(nil, dismissalPolicy: .immediate)
         }
         self.activity = nil
+    }
+
+    /// Gate + forward one diagnostic line to `workoutsLog`, checking `TestCentre.active(.workouts)`
+    /// BEFORE building the string — same zero-cost-when-off discipline as `AppModel.emitWorkoutsTrace`
+    /// (`Strand/App/AppModel.swift`), so this costs one UserDefaults bool read when Workouts & GPS test
+    /// mode is off. `@autoclosure` so the interpolated string in every call site above is never built
+    /// unless the mode is actually on.
+    private func logWorkouts(_ build: @autoclosure () -> String) {
+        guard TestCentre.active(.workouts), let workoutsLog else { return }
+        workoutsLog(build())
     }
 }
 #endif
