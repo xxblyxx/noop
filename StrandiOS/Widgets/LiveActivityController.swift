@@ -70,7 +70,13 @@ final class LiveActivityController {
         // — which made the #336 opt-out a no-op (#341: toggle off, heart stays) and risked spawning a
         // duplicate on the start path below. Done on the HR tick rather than in `init` because
         // `Activity.activities` isn't reliably hydrated at the instant of process launch.
-        if activity == nil { activity = Activity<NOOPActivityAttributes>.activities.first }
+        if activity == nil {
+            let all = Activity<NOOPActivityAttributes>.activities
+            activity = all.first
+            if !all.isEmpty {
+                logWorkouts("liveActivity: re-adopted \(all.count) existing activit\(all.count == 1 ? "y" : "ies"), state=\(all.first.map { String(describing: $0.activityState) } ?? "nil")")
+            }
+        }
 
         // User opt-out (#336): if the in-app toggle is off, never start — and end any activity that's
         // already showing (the user just turned it off; this fires on the next ~1 Hz HR tick).
@@ -107,12 +113,16 @@ final class LiveActivityController {
         if let activity {
             guard Date().timeIntervalSince(lastPush) > 2 else { return }
             lastPush = Date()
+            logWorkouts("liveActivity: updating existing activity id=\(activity.id) state=\(String(describing: activity.activityState))")
             Task { await activity.update(ActivityContent(state: state, staleDate: staleDate)) }
         } else {
             // Set the start gate SYNCHRONOUSLY before any await so a second `update` arriving on the
             // main actor while `Activity.request` is still in flight bails here instead of issuing a
             // second request. The 2-second throttle above only guards the update path.
-            guard !isStarting else { return }
+            guard !isStarting else {
+                logWorkouts("liveActivity: request skipped — isStarting already true")
+                return
+            }
             isStarting = true
             do {
                 activity = try Activity.request(
