@@ -485,6 +485,25 @@ final class Repository: ObservableObject {
         ) { Repository.widgetAnchor(days: $0, logicalKey: $1, localKey: $2) }
     }
 
+    /// Twin memo for the recovery-INDEPENDENT today row. Same reason as `widgetAnchorMemo`: the Live
+    /// Activity resolves per live-HR tick, and the fields that must NOT be recovery-gated need today's own
+    /// row, not the anchor.
+    private var todayRowMemo = WidgetAnchorMemo()
+
+    /// Memoized `resolveToday(days:logicalKey:localKey:)` for the per-tick live surfaces — the recovery-
+    /// INDEPENDENT counterpart to `cachedWidgetAnchor`. The Live Activity's Effort read needs today's own
+    /// row (Effort never carries), and reaching for the un-memoized `repo.today` inside a 1-3 Hz `onReceive`
+    /// would reintroduce exactly the two-`DateFormatter`-plus-scan cost per tick that `widgetAnchorMemo`
+    /// exists to kill. Byte-identical to `today` / the pure `resolveToday`; tests call those directly.
+    func cachedTodayRow(now: Date = Date()) -> DailyMetric? {
+        todayRowMemo.resolve(
+            days: days,
+            seq: refreshSeq,
+            logicalKey: Self.logicalDayKey(now),
+            localKey: Self.localDayKey(now)
+        ) { Repository.resolveToday(days: $0, logicalKey: $1, localKey: $2) }
+    }
+
     /// The recovery-INDEPENDENT overnight-vitals carry (the durable fix for the v8 Today rollover blank):
     /// the freshest strictly-prior day that recorded any of HRV / resting HR / respiratory, so the recovery
     /// VITALS keep reading through the post-04:00 window before tonight's sleep is scored, WITHOUT being

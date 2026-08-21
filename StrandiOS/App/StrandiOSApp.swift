@@ -307,7 +307,13 @@ private struct LiveActivityDriver: ViewModifier {
     /// `connectedOverride` exists only for the `$connected` site above; every other caller reads the
     /// current `model.live.connected` directly.
     private func push(connectedOverride: Bool? = nil) {
+        // The anchor gates RECOVERY ONLY. Effort reads today's OWN row: it deliberately never carries
+        // (yesterday's strain shown as today's is a false statement), and funnelling it through the
+        // recovery-gated anchor blanked the Lock Screen's Effort whenever nothing was scored — the same
+        // coupling that blanked the Home Screen widget. Both resolves are memoized because this closure
+        // runs on every live-HR tick. Mirrors `Repository.glanceFields`.
         let day = model.repo.cachedWidgetAnchor()
+        let todayRow = model.repo.cachedTodayRow()
         let connected = connectedOverride ?? model.live.connected
         let workout = workoutActivityPayload()
         // Trace at the CALL SITE, not just inside the controller. The first diagnostic pass logged
@@ -323,7 +329,7 @@ private struct LiveActivityDriver: ViewModifier {
             bpm: connected ? (model.bpm ?? model.live.heartRate) : nil,
             recovery: day?.recovery.map { Int($0.rounded()) },
             connected: connected,
-            effort: day?.strain.map { Int($0.rounded()) },
+            effort: todayRow?.strain.map { Int($0.rounded()) },
             workout: workout
         )
     }
