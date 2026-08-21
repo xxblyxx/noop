@@ -38,10 +38,19 @@ final class LiveActivityController {
     /// frozen activity if the app is suspended/killed without an explicit end (a missed-tick safety net
     /// on top of the connected-driven end below).
     private static let staleAfter: TimeInterval = 120
+    /// Same safety net, but wide enough to survive a normal WHOOP 5/MG lull rather than fire during
+    /// one. `BLEManager.swift` documents standard-HR (0x2A37) going quiet for over 120 s at rest/off-
+    /// wrist as "a FAMILY trait of the 5/MG HR profile" — its own `bounceFuse` gives that link 600 s
+    /// before treating it as genuinely gone. 120 s would greatly outpace a healthy workout activity
+    /// during an ordinary lull; match the strap's own tolerance instead.
+    private static let workoutStaleAfter: TimeInterval = 600
 
     /// Drive the activity from the latest live values. Lazily starts when the strap is CONNECTED (the
-    /// live link, not the sticky "paired" flag) and a heart rate is present; ends the moment the link
-    /// drops. Throttled to ~once every 2 s so we stay well under the Live Activity update budget.
+    /// live link, not the sticky "paired" flag) and a heart rate is present — OR a workout is
+    /// recording, in which case the ticking elapsed clock alone justifies the surface even through an
+    /// HR lull. Ends the moment the live link drops, UNLESS a workout is active: that case keeps the
+    /// activity up with HR rendering "—" rather than vanishing mid-session over a transient dropout.
+    /// Throttled to ~once every 2 s so we stay well under the Live Activity update budget.
     func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil,
                workout: WorkoutActivityPayload? = nil) {
         guard authInfo.areActivitiesEnabled else { return }
@@ -61,21 +70,26 @@ final class LiveActivityController {
             return
         }
 
-        // End the moment the live link drops — `bonded` stays true across every disconnect (it means
-        // "this strap is paired"), so keying off it left a frozen, fabricated "live" HR on the Lock
-        // Screen / Dynamic Island indefinitely after the strap went out of range.
-        if !connected {
+        // End the moment the live link drops — UNLESS a workout is recording. `bonded` stays true
+        // across every disconnect (it means "this strap is paired"), so keying off IT left a frozen,
+        // fabricated "live" HR indefinitely after the strap went out of range; `connected` fixed that
+        // for the ambient case, but during a workout a transient dropout must not take the whole Lock
+        // Screen down with it — `bpm` renders "—" instead (it's already nil from the call site whenever
+        // `connected` is false), while TIME and Effort carry on.
+        if !connected && workout == nil {
             Task { await end() }
             return
         }
-        guard bpm != nil else { return }
+        // A workout's ticking clock justifies the activity even with no HR yet (starting during a
+        // strap lull previously produced no activity at all).
+        guard bpm != nil || workout != nil else { return }
 
         let state = NOOPActivityAttributes.ContentState(
             bpm: bpm, recovery: recovery, bonded: connected, effort: effort,
             workoutStart: workout?.start, sport: workout?.sport, zone: workout?.zone,
             workoutEffortText: workout?.effortText, workoutKcal: workout?.kcal,
             distanceText: workout?.distanceText, paceText: workout?.paceText)
-        let staleDate = Date().addingTimeInterval(Self.staleAfter)
+        let staleDate = Date().addingTimeInterval(workout != nil ? Self.workoutStaleAfter : Self.staleAfter)
 
         if let activity {
             guard Date().timeIntervalSince(lastPush) > 2 else { return }
