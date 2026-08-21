@@ -1,5 +1,11 @@
 # Workout mode for the NOOP Live Activity
 
+**Status:** Phases 0–3 are DONE and committed on `feat/live-workout-activity` (4 commits, `main` still
+untouched). The first on-device test then found the feature produces NO Live Activity at all — see
+**Phase 4** below, which is the current work: a diagnostics-only fix so the NEXT on-device attempt
+produces an answer instead of another guess. Everything through Phase 3 is historical context for how
+the feature was built; skip to Phase 4 for what's actually being worked on now.
+
 ## Context
 
 **The gap is not the in-app screen — it's the glanceable one.**
@@ -302,8 +308,9 @@ Widget-side helpers already available: `WorkoutTypeIconography.systemSymbolName(
 | `StrandiOSShared/LiveActivityAttributes.swift` | widen `ContentState` (Phase 1) |
 | `Strand/App/AppModel.swift` | **realtime-HR ref moves to workout scope (2a — the blocker)**; `liveKcal` from `Calories.estimateBoutCalories` (2b) |
 | `StrandiOS/App/StrandiOSApp.swift` | pass workout payload at both `update` sites + a third on workout start/end (2c) |
-| `StrandiOS/Widgets/LiveActivityController.swift` | start without HR, workout-aware end, longer stale window (2d) |
+| `StrandiOS/Widgets/LiveActivityController.swift` | start without HR, workout-aware end, longer stale window (2d); stop swallowing `Activity.request` errors, `.workouts`-domain diagnostic lines (Phase 4) |
 | `StrandiOSWidgets/NOOPLiveActivity.swift` | the two-mode layout (Phase 3) |
+| `StrandiOS/App/StrandiOSApp.swift` | wire `liveActivity.workoutsLog = { model.live.append(log: $0, domain: .workouts) }` (Phase 4) |
 | `StrandTests/…` | new tests, below |
 
 ---
@@ -395,18 +402,99 @@ into this one. They're covered by the on-device pass below instead; nothing here
 
 ---
 
+## Phase 4 — on-device test #1 failed: diagnose before guessing again
+
+**What happened.** First on-device run (per the plan's own gate above — no prior on-device pass
+existed for this feature, so this is "the feature meeting reality for the first time," not a
+regression from the four commits): started a workout, locked the phone, got **no Live Activity at
+all** — not the new workout layout, not even the pre-existing ambient "Live HR" layout. The Dynamic
+Island instead showed a directional arrow.
+
+**Ruled out already, by code + a live device check (both done, no rebuild needed):**
+
+- **The arrow is not ours.** `GpsWorkoutRecorder.swift:330` sets `allowsBackgroundLocationUpdates =
+  true`, armed by `startWorkout()` for any distance sport. `showsBackgroundLocationIndicator` is never
+  set anywhere in the repo, so iOS shows its own system location arrow — unrelated to
+  `NOOPActivityAttributes`. Its presence is actually informative: it proves `startWorkout()` ran, the
+  sport was distance-type, and GPS fixes are flowing.
+- **The widget extension is installed and working.** Owner confirmed two NOOP Lock Screen widgets
+  render real data right now. The Live Activity ships in the same `NOOPWidgets.appex` bundle, so this
+  rules out a packaging/provisioning failure (the class of bug `#742`/`docs/IOS.md:52-58` describes).
+- **Neither OS-level gate is the cause.** Owner confirmed Settings → Face ID & Passcode → Live
+  Activities is ON, and Settings → NOOP → Live Activities is ON (or not yet created, same effect).
+  These are the two settings that would produce exactly this symptom (nothing at all) by making
+  `ActivityAuthorizationInfo.areActivitiesEnabled` false at `LiveActivityController.swift:56`.
+- **`NSSupportsLiveActivities` is correctly set** on the `NOOPiOS` target and confirmed present in the
+  actual installed binary (`project.yml:247`, `StrandiOS/Resources/Info.plist:71-72`).
+
+**What's left, and why it can't be resolved by guessing:** `Activity.request` can still throw for
+reasons the two Settings toggles don't cover — `.unsupported`, `.attributesTooLarge`,
+`.globalMaximumExceeded`, `.visibility`, or a `ContentState` decode issue on the widget-extension side.
+`LiveActivityController.swift:111-113` catches every one of these and does **nothing** — no log, no
+UI signal, no state — so the app behaves identically whether `Activity.request` was never called or
+was called and silently rejected. Compounding this: `authInfo` (`:30`) is cached ONCE for the
+controller's lifetime on the assumption "auth status only changes via Settings," which is true but
+irrelevant — the controller never re-observes a mid-session change anyway, since it's checked fresh on
+every `update()` call regardless of caching. That specific worry turned out to be a red herring, but
+the silent `catch` is not. There is also **zero Test Centre / diagnostic visibility into ActivityKit**
+anywhere in the codebase (verified: no `LiveState.append(log:)` call site in any ActivityKit code
+path, in any domain) — so today's failure could not have been diagnosed from the phone even if the
+owner had known exactly where to look.
+
+**Fix: make the failure observable, then re-run the exact same on-device test — don't change any
+Live-Activity *behavior* speculatively.** This is a diagnostics commit, landing before any further
+behavior change, so the next on-device attempt actually produces evidence instead of another guess:
+
+1. **Stop swallowing the `Activity.request` error.** `LiveActivityController.swift:111-113` currently
+   discards `error` entirely. Capture it and route it straight into the log line item 2 adds for this
+   `catch` block — no separate stored property, no new surface to read it from later; the Test Centre
+   export IS the read path for this diagnostic.
+
+2. **Log every meaningful transition into the EXISTING `.workouts` Test Centre domain** — no new
+   `TestDomain` case, no Kotlin-twin obligation. `.workouts` already exists, is already wired
+   end-to-end (`AppModel.swift:219-220`: `repo.workoutsLog` / `gpsRecorder.workoutsLog` closures →
+   `live.append(log:domain:.workouts)`; consumed by `TestCentreView.swift:734`'s
+   `WorkoutsReadout.lastSessionSummary`), and is semantically right: this diagnostic only matters
+   *during a workout*. `LiveActivityController` needs a way to reach `LiveState.append(log:domain:)` —
+   thread a `var workoutsLog: ((String) -> Void)?` closure into it, set from `StrandiOSApp` the same
+   way `AppModel.init()` wires `repo.workoutsLog` / `gpsRecorder.workoutsLog`, so the controller stays
+   free of a direct `LiveState` dependency. Gate every line behind `TestCentre.active(.workouts)`
+   exactly like `AppModel.emitWorkoutsTrace` (`AppModel.swift:673-677`) already does — the existing
+   pattern of checking BEFORE building the string, so it's zero-cost when the mode is off. Lines:
+   - `areActivitiesEnabled == false` at the `:56` gate — log it once per state change, not every tick.
+   - The `catch` block itself — log the thrown error's description (`String(describing: error)`).
+   - A successful `Activity.request` — log once, so "it started" is confirmable without ActivityKit's
+     own opaque system UI.
+   - `end()` firing — log which of the two call sites triggered it (disconnect vs. opt-out).
+
+3. **No new UI, no new toggle.** `.workouts` mode is already switchable from Test Centre; the owner
+   turns it on before the re-test, same as any existing guided capture.
+
+**Explicitly NOT in this phase:** no change to when the activity starts, ends, or what it renders.
+Behavior stays exactly as commits 2–4 left it. This phase only makes the NEXT on-device attempt
+legible. If the diagnostic log shows `Activity.request` throwing, or `areActivitiesEnabled` false at
+the moment of the test, that tells us precisely what to fix next — a targeted follow-up, not another
+round of hypotheses.
+
+**Re-test procedure, after this lands:** rebuild + reinstall (same `xcodegen generate` →
+`xcodebuild ... build` → `xcrun devicectl device install app` sequence already used today), turn on
+the **Workouts & GPS** Test Centre mode (already exists — this is the same toggle used for GPS/session
+diagnostics), start a workout, lock the phone, wait, then pull the exported log and read the new
+Live-Activity lines tagged `.workouts` alongside the existing session-lifecycle lines. That log is the
+deliverable of this phase — read it before proposing anything else.
+
+---
+
 ## Process
 
-- On `main` and clean. **Branch first** per `CLAUDE.md`: `feat/live-workout-activity`. Do not edit
-  until that is settled.
-- One concern per commit. Suggested split: (1) the realtime-HR arming fix in 2a — it stands on its
-  own as a bug fix and is worth landing separately; (2) the workout Live Activity — `ContentState`
-  widening, live kcal, drive sites, rendering; (3) the three controller lifecycle fixes in 2d.
-- **Do not merge to `main` until the on-device strap pass above has actually run.** The three commits
-  compile clean and the analytics-side claim (kcal parity) is test-pinned, but the feature's actual
-  correctness — the 2a regression case above all — is unverified until it's been run on the WHOOP 5.0
-  on hand. State that plainly rather than merging on "it compiled."
-- When verified on-device: `git merge --ff-only` into `main`, delete the branch. **No push** — the
-  local commit is the deliverable.
-- Copy this plan to `docs/superpowers/plans/` if it is worth keeping; `~/.claude/plans/` is scratch.
-- `/wrapup` afterwards: `REPO_MAP.md` needs no change (no new top-level structure).
+- Branch `feat/live-workout-activity` already exists and holds the 4 commits from Phases 0–3 (the
+  realtime-HR arming fix, the workout Live Activity itself, the lull-survival lifecycle fixes, and the
+  kcal-parity test). Phase 4 lands as its own commit on the same branch — it's a genuinely separate
+  concern (observability, not behavior) from any of the four already landed.
+- **Still do not merge to `main`.** The on-device gate from the original plan stands, unchanged: this
+  feature has zero confirmed on-device correctness, and the first attempt failed with no diagnosis.
+  Phase 4 exists specifically to make the *next* attempt diagnosable — merge only after that attempt
+  either succeeds outright or the diagnostic log points at a specific, fixed cause.
+- Copy this plan's updates to `docs/superpowers/plans/2026-08-20-workout-live-activity.md` (already
+  exists from Phases 0–3; overwrite it, don't create a second file) once Phase 4 is implemented.
+- `/wrapup` afterwards: `REPO_MAP.md` still needs no change.
