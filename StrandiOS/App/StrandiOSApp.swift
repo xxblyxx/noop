@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import StrandDesign
+import StrandAnalytics
 import UserNotifications
 
 /// iOS entry point. Unlike the macOS app (which adds a `MenuBarExtra` scene), iOS uses a single
@@ -123,34 +124,13 @@ struct StrandiOSApp: App {
                 // fixed-geometry tiles/gauges stay legible at the largest accessibility sizes rather than
                 // clipping; the common Larger-Text range still scales fully.
                 .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-                .onReceive(model.live.$heartRate) { _ in
-                    // #911: anchor the Live Activity on the SAME shared `Repository.widgetAnchor` the
-                    // Home/Lock widget and the watch snapshot use, so this fourth surface can't drift to a
-                    // different day at the rollover (it previously read `days.last(where: recovery != nil)`,
-                    // which kept pointing at yesterday's scored row after Today had moved on).
-                    // Memoized: this closure fires on EVERY live-HR tick, so re-deriving the anchor here
-                    // scanned the whole history + hit the DateFormatter lock ~1-3x/sec (#1051-shaped).
-                    let day = model.repo.cachedWidgetAnchor()
-                    liveActivity.update(
-                        bpm: model.live.connected ? (model.bpm ?? model.live.heartRate) : nil,
-                        recovery: day?.recovery.map { Int($0.rounded()) },
-                        connected: model.live.connected,
-                        effort: day?.strain.map { Int($0.rounded()) }
-                    )
-                }
-                // End the Live Activity the moment the link drops, even if no further HR tick arrives.
-                .onReceive(model.live.$connected) { isConnected in
-                    // #911: same shared anchor as the heartRate site above, so the Live Activity, the
-                    // widget, the watch and Today never disagree about which day they describe. Memoized
-                    // (shares the heartRate site's cache; recomputes only on a data refresh or day-roll).
-                    let day = model.repo.cachedWidgetAnchor()
-                    liveActivity.update(
-                        bpm: isConnected ? (model.bpm ?? model.live.heartRate) : nil,
-                        recovery: day?.recovery.map { Int($0.rounded()) },
-                        connected: isConnected,
-                        effort: day?.strain.map { Int($0.rounded()) }
-                    )
-                }
+                // Drives `liveActivity.update(...)` on every HR tick, connection change, and workout
+                // start/end. Extracted into its own `ViewModifier` (one `.modifier(...)` link here)
+                // rather than three separate top-level `.onReceive`/`.onChangeCompat` calls — this
+                // chain is already near Swift's type-checker complexity limit, and three more links
+                // here timed out compilation ("unable to type-check this expression in reasonable
+                // time"). See `LiveActivityDriver` below.
+                .modifier(LiveActivityDriver(model: model, liveActivity: liveActivity))
                 // #911/#759: republish the Home/Lock-Screen widget whenever the dashboard caches actually
                 // change mid-session. The only other publish site is the scenePhase .active handler, so
                 // during a long foreground session the widget froze at the last-foreground snapshot while
@@ -289,6 +269,88 @@ struct StrandiOSApp: App {
                 Task { await ShortcutHealthExport.writeIfEnabled(repo: model.repo) }
             }
         }
+    }
+}
+
+/// Drives `liveActivity.update(...)` from `AppModel`: on every live-HR tick, on every connection
+/// change, and on workout start/end (so the Lock Screen flips into and out of the workout layout
+/// right away, rather than waiting for the next ~1 Hz HR tick to notice `activeWorkout` changed).
+/// A `ViewModifier` rather than inline `.onReceive`/`.onChangeCompat` calls on `WindowGroup`'s content
+/// — see the `.modifier(...)` call site in `StrandiOSApp.body` for why.
+private struct LiveActivityDriver: ViewModifier {
+    @ObservedObject var model: AppModel
+    let liveActivity: LiveActivityController
+    /// Effort's display scale — same key `StrandiOSApp` observes for the widget-snapshot rebuild.
+    @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
+    /// Distance unit for the workout Live Activity's GPS row — same key/default `DistancePaceRowIfPresent`
+    /// (LiveWorkoutView) reads, so the Lock Screen never disagrees with the in-app screen.
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(model.live.$heartRate) { _ in
+                // #911: anchor the Live Activity on the SAME shared `Repository.widgetAnchor` the
+                // Home/Lock widget and the watch snapshot use, so this fourth surface can't drift to a
+                // different day at the rollover. Memoized: this closure fires on EVERY live-HR tick.
+                push()
+            }
+            // End the Live Activity the moment the link drops, even if no further HR tick arrives.
+            .onReceive(model.live.$connected) { isConnected in
+                // `isConnected` (the value Combine just delivered), NOT `model.live.connected` (the
+                // stored property) — `@Published` sends on `willSet`, so the property itself can still
+                // read the OLD value at the instant this closure runs.
+                push(connectedOverride: isConnected)
+            }
+            .onChangeCompat(of: model.activeWorkout != nil) { _ in push() }
+    }
+
+    /// `connectedOverride` exists only for the `$connected` site above; every other caller reads the
+    /// current `model.live.connected` directly.
+    private func push(connectedOverride: Bool? = nil) {
+        let day = model.repo.cachedWidgetAnchor()
+        let connected = connectedOverride ?? model.live.connected
+        liveActivity.update(
+            bpm: connected ? (model.bpm ?? model.live.heartRate) : nil,
+            recovery: day?.recovery.map { Int($0.rounded()) },
+            connected: connected,
+            effort: day?.strain.map { Int($0.rounded()) },
+            workout: workoutActivityPayload()
+        )
+    }
+
+    /// Builds the workout half of the Live Activity payload from `model.activeWorkout`, or nil when no
+    /// workout is recording — the single switch `ContentState.workoutStart` renders on. Unit-dependent
+    /// fields are pre-formatted HERE, not in the widget target (which links only `StrandDesign` and
+    /// doesn't see `Strand/Data/Units.swift`), reusing the exact helpers + format rules `LiveWorkoutView`
+    /// uses so the Lock Screen never disagrees with the in-app screen.
+    private func workoutActivityPayload() -> LiveActivityController.WorkoutActivityPayload? {
+        guard let w = model.activeWorkout else { return nil }
+        let zoneSet = model.profile.hrZoneSet
+        let zone = model.bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0
+
+        // Recompute directly (not `w.liveStrain`, which `captureWorkoutSample` already coalesces nil→0)
+        // so the pre-scoring `nil` survives to here — StrainScorer's own ~10-minute gate, not a stand-in
+        // "genuine zero". Cheap: memoized on the sample-stream fingerprint. Same no-decimal-on-the-native-
+        // axis formatting LiveWorkoutView's effort hero uses, not the always-one-decimal `effortDisplay`.
+        let liveStrain = StrainScorer.strain(w.samples, maxHR: Double(model.profile.hrMax), sex: model.profile.sex)
+        let effortScale = UnitPrefs.resolveEffortScale(effortScaleRaw)
+        let effortText: String? = liveStrain.map { strain in
+            let displayEffort = UnitFormatter.effortValue(strain, scale: effortScale)
+            return effortScale == .whoop ? String(format: "%.1f", displayEffort) : "\(Int(displayEffort.rounded()))"
+        }
+
+        // Same gate as `DistancePaceRowIfPresent` (LiveWorkoutView.swift): recording AND at least one
+        // accepted fix, so a distance sport with no GPS lock yet — or a non-distance sport, which never
+        // arms the recorder — omits the row entirely rather than showing "0.00 km".
+        let unitSystem = UnitSystem(rawValue: unitSystemRaw) ?? .metric
+        let hasGps = model.gpsRecorder.isRecording && model.gpsRecorder.pointCount > 0
+        let distanceText = hasGps ? UnitFormatter.distanceFromMeters(model.gpsRecorder.distanceM, system: unitSystem) : nil
+        let paceText = hasGps ? UnitFormatter.paceFromSecPerKm(model.gpsRecorder.paceSecPerKm, system: unitSystem) : nil
+
+        return LiveActivityController.WorkoutActivityPayload(
+            start: w.start, sport: w.sport, zone: zone,
+            effortText: effortText, kcal: model.liveKcal,
+            distanceText: distanceText, paceText: paceText)
     }
 }
 

@@ -6,6 +6,22 @@ import ActivityKit
 /// in the Dynamic Island while the strap is bonded and streaming heart rate.
 @MainActor
 final class LiveActivityController {
+    /// The workout half of an `update()` call — nil renders today's ambient Live-HR layout, non-nil
+    /// renders the workout layout ("Zone Glass"). Built by `StrandiOSApp.workoutActivityPayload()`,
+    /// which pre-formats every unit-dependent field so this controller (and the widget target) never
+    /// need `Strand/Data/Units.swift`.
+    struct WorkoutActivityPayload {
+        let start: Date
+        let sport: String
+        let zone: Int
+        /// nil while `StrainScorer.strain` hasn't scored yet (its own ~10-minute gate) — renders "—".
+        let effortText: String?
+        let kcal: Int?
+        /// Both nil unless GPS is actually live for a distance sport.
+        let distanceText: String?
+        let paceText: String?
+    }
+
     private var activity: Activity<NOOPActivityAttributes>?
     private var lastPush: Date = .distantPast
     /// Cached `ActivityAuthorizationInfo` — `update` runs at ~1 Hz off the live HR stream, and
@@ -26,7 +42,8 @@ final class LiveActivityController {
     /// Drive the activity from the latest live values. Lazily starts when the strap is CONNECTED (the
     /// live link, not the sticky "paired" flag) and a heart rate is present; ends the moment the link
     /// drops. Throttled to ~once every 2 s so we stay well under the Live Activity update budget.
-    func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil) {
+    func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil,
+               workout: WorkoutActivityPayload? = nil) {
         guard authInfo.areActivitiesEnabled else { return }
 
         // Re-adopt an activity that outlived a previous app session. ActivityKit keeps Live Activities
@@ -53,8 +70,11 @@ final class LiveActivityController {
         }
         guard bpm != nil else { return }
 
-        let state = NOOPActivityAttributes.ContentState(bpm: bpm, recovery: recovery, bonded: connected,
-                                                        effort: effort)
+        let state = NOOPActivityAttributes.ContentState(
+            bpm: bpm, recovery: recovery, bonded: connected, effort: effort,
+            workoutStart: workout?.start, sport: workout?.sport, zone: workout?.zone,
+            workoutEffortText: workout?.effortText, workoutKcal: workout?.kcal,
+            distanceText: workout?.distanceText, paceText: workout?.paceText)
         let staleDate = Date().addingTimeInterval(Self.staleAfter)
 
         if let activity {

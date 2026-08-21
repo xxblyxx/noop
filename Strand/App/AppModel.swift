@@ -852,6 +852,23 @@ final class AppModel: ObservableObject {
         persistActiveWorkout()
     }
 
+    /// Live calories for the active workout, for the Live Activity's glance grid. A pure function of
+    /// `activeWorkout.samples` + profile, recomputed on read rather than stored on `ActiveWorkout` — so
+    /// it needs no change to `ActiveWorkoutPersistence.Snapshot` and carries no Kotlin obligation.
+    /// Mirrors `endWorkout()`'s kcal calculation exactly (`:790`), including the same `samples.count >=
+    /// 2` gate and the same measured `repo.today?.restingHr` (not the live-effort path's default 60 —
+    /// that divergence is #983 and deliberate for Effort; calories have no such reason to copy it, so
+    /// the live and saved kcal numbers agree given the same inputs). nil under the gate, same as Effort.
+    var liveKcal: Int? {
+        guard let w = activeWorkout, w.samples.count >= 2 else { return nil }
+        let up = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
+                             age: Double(profile.age), sex: profile.sex)
+        let restingHR = repo.today?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
+        let kcal = Calories.estimateBoutCalories(w.samples, profile: up, hrmax: Double(profile.hrMax),
+                                                 restingHR: restingHR).0
+        return Int(kcal.rounded())
+    }
+
     /// Drop the smoothing window and blank the hero number so a resume / re-attach shows ","
     /// until a genuinely fresh sample arrives, instead of republishing the stale pre-gap median.
     /// Called on Live-tab entry / manual Start HR (see `startRealtimeHR`), NOT on the 30s keep-alive
