@@ -508,6 +508,77 @@ final class Repository: ObservableObject {
         DailyMetric.lastVitalsDay(days: days, todayKey: todayKey)
     }
 
+    /// The five glance stats an off-dashboard surface shows, each resolved by the SAME selector its
+    /// in-app Today counterpart uses. Exists because the widget publish used to funnel ALL FIVE through
+    /// the recovery-gated `widgetAnchor`: one null `recovery` column then blanked Charge, Effort, Rest,
+    /// HRV and Resting HR together on the Home Screen while Today — which resolves them through four
+    /// INDEPENDENT selectors — still showed four of them. The anchor legitimately gates Charge and
+    /// nothing else.
+    struct GlanceFields {
+        /// Recovery on the 0–100 axis. Recovery-GATED by design: a blank Charge is honest when nothing
+        /// anywhere is scored.
+        var charge: Double?
+        /// Strain on the stored 0–100 axis. NEVER carried (see below).
+        var effort: Double?
+        /// Rest (`sleep_performance`) 0–100, staleness-gated.
+        var rest: Double?
+        /// HRV in ms, with the recovery-independent overnight carry.
+        var hrv: Double?
+        /// Resting heart rate in bpm, with the same carry.
+        var restingHr: Int?
+    }
+
+    /// Resolve the five glance stats WITHOUT funnelling them through one recovery-gated row.
+    ///
+    /// Pure + injectable (no clock, no `AppModel`, no store read) so the whole boundary is unit-testable
+    /// headlessly — the caller supplies the already-read `sleep_performance` series as `restByDay` plus its
+    /// tail. Invents no new selector: it composes the four Today already uses, so the widget, the Live
+    /// Activity and the wrist agree with the dashboard field by field instead of only day by day.
+    ///
+    /// Per-field rationale (each mirrors a specific Today call site):
+    /// - **Charge** keeps `widgetAnchor` (the #911 shared anchor). It is the ONE field the recovery gate
+    ///   belongs on.
+    /// - **Effort** deliberately does NOT carry (`LiquidTodayView` "Effort deliberately does NOT carry — it
+    ///   is today's own accumulation"). Yesterday's strain shown as today's is a FALSE statement, not merely
+    ///   a stale one, so it reads today's own row or nothing.
+    /// - **Rest** routes through the shared `TodayView.freshRestScore` (#977 staleness gate) — the same
+    ///   helper `WatchSessionBridge` already adopted. The widget previously carried an older inline
+    ///   expression with no gate, AND nested it inside `if let anchor`, which is what blanked Rest even
+    ///   though `sleep_performance` is an entirely independent series.
+    /// - **HRV / Resting HR** take the today-first PER-FIELD carry (`todayRow?.field ?? vitalsDay?.field`)
+    ///   over `lastVitalsDay`, which is explicitly recovery-INDEPENDENT: a night with real HRV/RHR but a
+    ///   null recovery is a valid source for vitals, unlike for Charge.
+    ///
+    /// `todayKey` is `todayRow?.day ?? logicalKey` — byte-identical to `widgetAnchor`'s own `carriedKey`.
+    /// Today's `selectedDayKey` instead falls back to `localDayKey`, and the 2-arg
+    /// `lastVitalsDay(days:now:)` convenience uses `max(logicalKey, localKey)`; BOTH diverge from this in
+    /// the #304 pre-04:00 window. The divergence cannot bite today (it is reachable only when
+    /// `todayRow == nil`, where `effort`/`hrv`/`restingHr` are nil regardless), but it is exactly the
+    /// near-miss class that produced the #911 drift, so it is pinned here deliberately rather than left to
+    /// whichever overload a future call site reaches for. Do NOT swap in the 2-arg overload.
+    nonisolated static func glanceFields(days: [DailyMetric],
+                                         logicalKey: String,
+                                         localKey: String,
+                                         restByDay: [String: Double],
+                                         restTail: (day: String, value: Double)?) -> GlanceFields {
+        // Today's own row: the #304 pre-04:00 carve-out and the #144 anti-blank guard, WITHOUT a recovery gate.
+        let todayRow = resolveToday(days: days, logicalKey: logicalKey, localKey: localKey)
+        let todayKey = todayRow?.day ?? logicalKey
+        let vitals = lastVitalsDay(days: days, todayKey: todayKey)
+        return GlanceFields(
+            charge: widgetAnchor(days: days, logicalKey: logicalKey, localKey: localKey)?.recovery,
+            effort: todayRow?.strain,
+            // `isTodaySelected: true` unconditionally — these surfaces always describe today, they have no
+            // day picker to move off it.
+            rest: TodayView.freshRestScore(todayValue: restByDay[todayKey],
+                                           lastDay: restTail?.day,
+                                           lastValue: restTail?.value,
+                                           isTodaySelected: true,
+                                           todayKey: todayKey),
+            hrv: todayRow?.avgHrv ?? vitals?.avgHrv,
+            restingHr: todayRow?.restingHr ?? vitals?.restingHr)
+    }
+
     /// PER-FIELD SpO₂ carry — the twin of `lastVitalsDay(days:todayKey:)` for the field its predicate does
     /// NOT check. The engine writes `spo2Pct = nil` on computed rows (only imported rows carry a percentage),
     /// so a whole-row carry lands on a null `spo2Pct`; this resolves the freshest strictly-prior row that

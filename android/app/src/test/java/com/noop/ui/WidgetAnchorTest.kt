@@ -12,6 +12,10 @@ import org.junit.Test
  * (Swift Repository.widgetAnchor) so the two platforms stay byte-for-byte in agreement: anchor on today's
  * row when scored, else carry the freshest STRICTLY-PRIOR scored day, with the #304 pre-04:00 carve-out
  * and the #547 future-day guard folded in.
+ *
+ * NOTE what a null anchor does and does NOT mean: it gates RECOVERY only. Rest and Effort resolve off
+ * today's own row and are unaffected — see [WidgetGlanceFieldsTest]. A null anchor used to blank all
+ * three, which is the bug that split fixed.
  */
 class WidgetAnchorTest {
 

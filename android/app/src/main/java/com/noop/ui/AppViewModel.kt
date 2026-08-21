@@ -909,15 +909,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     // right after the rollover and never re-surfaces a stale scored row AS today. Only the
                     // widget reads the anchor here (the notification's honest-null contract lives in the
                     // service), keeping the two symmetric.
+                    // The anchor gates RECOVERY ONLY. Rest and Effort resolve off today's OWN row
+                    // (`resolveTodayRow`), which is NOT recovery-gated: routing all three through the
+                    // anchor meant a store with no scored recovery row blanked every stat block on the
+                    // widget at once, while the dashboard — which reads them per-field — still showed
+                    // them. Effort must additionally never carry: yesterday's strain shown as today's is
+                    // a false statement, not a stale one. Twin of Swift `Repository.glanceFields`.
                     val anchorRow = widgetAnchorRow(days, logicalKey, localKey)
+                    val todayRow = resolveTodayRow(days, logicalKey, localKey)
                     WidgetSnapshotStore.push(
                         appContext,
                         WidgetSnapshot(
                             recoveryPct = anchorRow?.recovery?.roundToInt(),
                             // Rest = the sleep_performance composite from THIS row's banked stage figures
                             // (pure, honest-null until last night is scored); Effort = the 0–100 strain. (#516)
-                            restPct = anchorRow?.let { RestScorer.restFromDaily(it)?.roundToInt() },
-                            effortPct = anchorRow?.strain?.roundToInt(),
+                            restPct = todayRow?.let { RestScorer.restFromDaily(it)?.roundToInt() },
+                            effortPct = todayRow?.strain?.roundToInt(),
                             heartRate = live.heartRate,
                             batteryPct = live.batteryPct?.roundToInt(),
                             connected = live.connected,

@@ -124,9 +124,13 @@ internal class NotifyDayStateCache(
         val anchorRow = com.noop.ui.widgetAnchorRow(days, logicalKey, localKey)
         val state = NotifyDayState(
             todayRecovery = todayRow?.recovery,
+            // The anchor gates RECOVERY ONLY; Rest and Effort read today's own row, which carries no
+            // recovery gate. Funnelling all three through the anchor blanked the whole widget whenever
+            // nothing was scored. Twin of Swift `Repository.glanceFields`; mirrors the AppViewModel
+            // producer above so the two Android producers stay symmetric.
             widgetRecovery = anchorRow?.recovery?.roundToInt(),
-            widgetRest = anchorRow?.let { RestScorer.restFromDaily(it)?.roundToInt() },
-            widgetEffort = anchorRow?.strain?.roundToInt(),
+            widgetRest = todayRow?.let { RestScorer.restFromDaily(it)?.roundToInt() },
+            widgetEffort = todayRow?.strain?.roundToInt(),
             illness = if (illnessEnabled) illnessEvaluator(days) else null,
             days = days,
         )

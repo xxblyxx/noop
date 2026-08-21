@@ -8,6 +8,11 @@ import WhoopStore
 /// (WidgetAnchorTest.kt) so the two platforms stay byte-for-byte in agreement: anchor on today's row when
 /// scored, else carry the freshest STRICTLY-PRIOR scored day, with the #304 pre-04:00 carve-out and the
 /// #547 future-day guard folded in.
+///
+/// NOTE what a nil anchor does and does NOT mean. It gates **Charge only**. The other glance stats
+/// (Effort, Rest, HRV, Resting HR) are resolved per-field by `Repository.glanceFields` and are
+/// unaffected by a nil here — see `WidgetGlanceFieldsTests`. A nil anchor used to blank all five,
+/// which is the bug that resolver exists to fix.
 final class WidgetAnchorTests: XCTestCase {
 
     /// A day row with an optional recovery + optional banked night, enough to exercise the resolver and
@@ -82,14 +87,14 @@ final class WidgetAnchorTests: XCTestCase {
     }
 
     func testFutureOnlyBesidesToday_returnsNil() {
-        // If the ONLY scored rows are future-dated, the anchor honestly returns nil (blank widget) rather
-        // than reaching forward in time.
+        // If the ONLY scored rows are future-dated, the anchor honestly returns nil (a blank CHARGE —
+        // the other four glance fields resolve independently) rather than reaching forward in time.
         let days = [day("2026-06-19", recovery: nil),    // today, unscored
                     day("2026-07-12", recovery: 80)]     // future-only
         XCTAssertNil(Repository.widgetAnchor(days: days, logicalKey: "2026-06-19", localKey: "2026-06-19"))
     }
 
-    // (e) no data -> nil (blank widget, no crash).
+    // (e) no data -> nil (blank Charge, no crash).
     func testNoData_returnsNil() {
         XCTAssertNil(Repository.widgetAnchor(days: [], logicalKey: "2026-06-19", localKey: "2026-06-19"))
     }
