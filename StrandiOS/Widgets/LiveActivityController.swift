@@ -29,14 +29,6 @@ final class LiveActivityController {
     /// only changes via Settings, so caching for the controller's lifetime is safe.
     private let authInfo = ActivityAuthorizationInfo()
 
-    /// Diagnostic sink for the "first on-device test produced NO Live Activity, with no way to tell
-    /// why" gap: `Activity.request`'s `catch` below used to discard its error entirely, and nothing in
-    /// this file ever logged anything, so the app behaved identically whether ActivityKit was never
-    /// asked or was asked and silently refused. Routed into the EXISTING `.workouts` Test Centre
-    /// domain (not a new domain — no Kotlin-twin obligation) because this only matters during a
-    /// workout, mirroring how `AppModel` wires `repo.workoutsLog` / `gpsRecorder.workoutsLog`. Set from
-    /// `StrandiOSApp`; nil (and therefore inert) in previews/tests that construct this controller bare.
-    var workoutsLog: ((String) -> Void)?
     /// Last `areActivitiesEnabled` value logged, so the gate at the top of `update()` logs once per
     /// EDGE rather than once per ~1 Hz tick while the app sits disabled.
     private var lastLoggedActivitiesEnabled: Bool?
@@ -152,14 +144,24 @@ final class LiveActivityController {
         self.activity = nil
     }
 
-    /// Gate + forward one diagnostic line to `workoutsLog`, checking `TestCentre.active(.workouts)`
-    /// BEFORE building the string — same zero-cost-when-off discipline as `AppModel.emitWorkoutsTrace`
-    /// (`Strand/App/AppModel.swift`), so this costs one UserDefaults bool read when Workouts & GPS test
-    /// mode is off. `@autoclosure` so the interpolated string in every call site above is never built
-    /// unless the mode is actually on.
+    /// Gate + emit one diagnostic line into the `.workouts` Test Centre domain, checking
+    /// `TestCentre.active(.workouts)` BEFORE building the string — same zero-cost-when-off discipline
+    /// as `AppModel.emitWorkoutsTrace` (`Strand/App/AppModel.swift`), so this costs one UserDefaults
+    /// bool read when Workouts & GPS test mode is off. `@autoclosure` so the interpolated string in
+    /// every call site above is never built unless the mode is actually on.
+    ///
+    /// Reaches `LiveState` through `AppModel.shared` rather than an injected closure. The first
+    /// attempt DID inject a closure (set from a `.onAppear` on `LiveActivityDriver`), and the
+    /// resulting on-device export contained ZERO `liveActivity:` lines while `.workouts` lines from
+    /// `AppModel` came through fine — proving the domain and the sink both worked and the injected
+    /// closure specifically did not. Rather than debug the injection, this drops it: a diagnostic
+    /// whose whole job is to explain a failure must not depend on wiring that can itself fail
+    /// silently. `AppModel.shared` is already the established escape hatch for exactly this (it
+    /// exists for App Intents, which are likewise constructed outside the view tree) and is `weak`,
+    /// so this is inert rather than crashing if no model exists.
     private func logWorkouts(_ build: @autoclosure () -> String) {
-        guard TestCentre.active(.workouts), let workoutsLog else { return }
-        workoutsLog(build())
+        guard TestCentre.active(.workouts) else { return }
+        AppModel.shared?.live.append(log: build(), domain: .workouts)
     }
 }
 #endif
