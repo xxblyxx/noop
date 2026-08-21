@@ -32,6 +32,12 @@ final class LiveActivityController {
     /// Last `areActivitiesEnabled` value logged, so the gate at the top of `update()` logs once per
     /// EDGE rather than once per ~1 Hz tick while the app sits disabled.
     private var lastLoggedActivitiesEnabled: Bool?
+    /// Whether the "suppressed by in-app toggle, no workout" case was already logged for the current
+    /// stretch of pushes — same once-per-edge discipline as `lastLoggedActivitiesEnabled`. Without
+    /// this, the toggle-off/no-workout path would either spam a log line at ~1 Hz or (as originally
+    /// shipped) emit nothing at all — the latter is what made the Phase 4 export show a healthy push
+    /// line followed by silence, with no way to tell "suppressed" apart from "never reached".
+    private var lastLoggedOptOut = false
     /// Synchronous gate against concurrent `Activity.request` calls. The `else` branch below is
     /// re-entered while the first request is still in flight (it hasn't assigned `self.activity`
     /// yet), so without this guard two close-together HR samples could both fire `Activity.request`
@@ -78,15 +84,27 @@ final class LiveActivityController {
             }
         }
 
-        // User opt-out (#336): if the in-app toggle is off, never start — and end any activity that's
-        // already showing (the user just turned it off; this fires on the next ~1 Hz HR tick).
-        guard UnitPrefs.liveActivityEnabled() else {
+        // User opt-out (#336) covers the AMBIENT live-HR surface only. A recording workout is a
+        // distinct, user-initiated surface — its ticking clock, zone and effort are the thing the user
+        // asked for by pressing Start — so it must show regardless of this toggle, and must not be
+        // torn down if the toggle is flipped mid-session. Re-evaluated on every `update()` call rather
+        // than captured once, so both mid-workout toggle directions and the end-of-workout reversion
+        // all read the CURRENT toggle state, not whatever it was at workout start.
+        guard UnitPrefs.liveActivityEnabled() || workout != nil else {
             if activity != nil {
-                logWorkouts("liveActivity: ending (in-app toggle off)")
+                logWorkouts("liveActivity: ending (in-app toggle off, no workout)")
                 Task { await end() }
+            } else if !lastLoggedOptOut {
+                // Log the SUPPRESSED case too, on the edge. Without this the toggle-off-with-no-
+                // activity path consumes a push and emits nothing — exactly why the Phase 4 export
+                // showed a healthy push line and then silence, with no way to tell "suppressed" apart
+                // from "Activity.request never reached".
+                logWorkouts("liveActivity: suppressed (in-app toggle off, no workout)")
             }
+            lastLoggedOptOut = true
             return
         }
+        lastLoggedOptOut = false
 
         // End the moment the live link drops — UNLESS a workout is recording. `bonded` stays true
         // across every disconnect (it means "this strap is paired"), so keying off IT left a frozen,

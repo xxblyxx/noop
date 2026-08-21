@@ -219,8 +219,10 @@ when the wearer is at rest / off-wrist… a FAMILY trait of the 5/MG HR profile"
    out a perfectly healthy workout activity during a normal lull. Match the strap's own tolerance
    (600 s), not the resting-glance default.
 
-The existing 2 s update throttle, the `isStarting` re-entrancy gate, the `Activity.activities`
-re-adoption and the `UnitPrefs.liveActivityEnabled()` opt-out all stay untouched.
+The existing 2 s update throttle, the `isStarting` re-entrancy gate, and the `Activity.activities`
+re-adoption stay untouched. The `UnitPrefs.liveActivityEnabled()` opt-out does **not** stay untouched —
+Phase 5 below scopes it to the ambient case only, after the first on-device test showed it was also
+suppressing the workout activity.
 
 ---
 
@@ -485,16 +487,46 @@ deliverable of this phase — read it before proposing anything else.
 
 ---
 
+## Phase 5 — the diagnosed cause, fixed: opt-out no longer suppresses the workout activity
+
+**Diagnostic verdict.** The Phase 4 log export answered the question: across a real 228 s workout,
+`areActivitiesEnabled=true`, `connected=true`, bpm present, `workout=true` on every push — but no
+`started`, `threw`, `re-adopted`, or `updating existing activity` line. The only path that consumes a
+push and emits nothing was the `UnitPrefs.liveActivityEnabled()` opt-out gate at
+`LiveActivityController.swift:83` (its `end()` log only fires when `activity != nil`), and the owner
+confirmed Settings → Strap → "Live heart rate in Dynamic Island" was OFF. That toggle's own name, copy
+and #336 origin are about the *ambient* Live-HR surface; it was never meant to gate a user-initiated
+workout, but the code gated the whole controller on it.
+
+**Fix.** `LiveActivityController.swift:83`'s guard became
+`UnitPrefs.liveActivityEnabled() || workout != nil`, re-evaluated on every `update()` call (not
+captured at workout start), so:
+
+- toggle OFF + workout starts → activity now appears (the case that failed on-device)
+- toggle flipped either direction mid-workout → the workout activity is undisturbed
+- workout ends → the toggle is re-read at that instant: reverts to ambient Live HR if ON, ends if OFF
+
+Also closed the log-silence itself: the previously-silent "suppressed, no workout" branch now logs
+once per edge (`lastLoggedOptOut`), so a future export can't confuse "suppressed" with "never reached"
+the way this one did.
+
+`Strand/Screens/SettingsView.swift`'s toggle footer was corrected to say workouts aren't affected.
+`attributes.title` (hardcoded `"Live HR"`) was checked and is fine to leave — nothing in the workout
+render branch (`NOOPLiveActivity.swift:75`, `:119` are both ambient-only) reads it.
+
+No twin obligation — this changes when an existing stored bool is consulted, not the key, default, or
+codec, and Live Activities are iOS-only.
+
+**Still not unit-testable**, same reason as Phase 4: `LiveActivityController` is iOS-app-target-only
+and `StrandTests` is a macOS target.
+
 ## Process
 
-- Branch `feat/live-workout-activity` already exists and holds the 4 commits from Phases 0–3 (the
-  realtime-HR arming fix, the workout Live Activity itself, the lull-survival lifecycle fixes, and the
-  kcal-parity test). Phase 4 lands as its own commit on the same branch — it's a genuinely separate
-  concern (observability, not behavior) from any of the four already landed.
-- **Still do not merge to `main`.** The on-device gate from the original plan stands, unchanged: this
-  feature has zero confirmed on-device correctness, and the first attempt failed with no diagnosis.
-  Phase 4 exists specifically to make the *next* attempt diagnosable — merge only after that attempt
-  either succeeds outright or the diagnostic log points at a specific, fixed cause.
-- Copy this plan's updates to `docs/superpowers/plans/2026-08-20-workout-live-activity.md` (already
-  exists from Phases 0–3; overwrite it, don't create a second file) once Phase 4 is implemented.
+- Branch `feat/live-workout-activity` holds the 4 commits from Phases 0–3, the Phase 4 diagnostics
+  commit, and the Phase 5 fix commit above.
+- **Still do not merge to `main`.** The on-device gate from the original plan stands: this feature has
+  zero confirmed on-device correctness. Phase 4 made the failure diagnosable; Phase 5 fixes the
+  diagnosed cause. Merge only after an on-device pass confirms the workout activity now appears with
+  the toggle off, and reverts/clears correctly at workout end in both toggle states (see Phase 5's
+  verification list in the working plan file used to implement it).
 - `/wrapup` afterwards: `REPO_MAP.md` still needs no change.
