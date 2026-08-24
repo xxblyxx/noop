@@ -555,15 +555,22 @@ public final class LiveState: ObservableObject {
         clearStrapRange()                 // a stale clock-drift window must not outlive the link either
         lastFrameAtUnix = nil             // #987: a stale "last frame" freshness must not outlive it either
         ouraWearState = nil               // a stale worn/charging badge must not outlive the link either
-        // Perf: flush the durable log tail on disconnect (mirroring is batched in `append`), so a completed
+        // Perf: flush the log tail on disconnect (mirroring is batched in `append`), so a completed
         // session's tail is always persisted for a later scheduled export despite the per-line throttle.
         // `wait: true`, deliberately — unlike the periodic mid-session mirror (no deadline), this flush has
         // one: the process may be about to terminate (jetsam, user force-quit right after a disconnect).
         // A dropped/pending write here could lose the very tail `rollLogGenerationsIfNeeded` exists to
         // rescue — see that function's doc comment for the three-consecutive-lost-captures history this
         // mechanism was built to fix. `persistQueue` is still off the main actor and still ordered after
-        // any periodic mirror already queued (see `enqueuePersistTail`'s doc), it just doesn't return here
-        // until the write is actually durable.
+        // any periodic mirror already queued (see `enqueuePersistTail`'s doc).
+        //
+        // #1005-STORM (review finding #8): `wait: true` guarantees the `UserDefaults.set` call is ISSUED
+        // before this returns, and — because `persistQueue` is serial — that it drains strictly after any
+        // earlier `.async` mirror already queued. It does NOT guarantee the write reached disk: UserDefaults
+        // only queues the value, and the OS decides when the backing plist is actually flushed. A hard kill
+        // immediately after this call returns can still lose it. An earlier version of this comment claimed
+        // the write "is actually durable" on return — corrected: that's more than `.sync` over UserDefaults
+        // can promise on its own.
         enqueuePersistTail(wait: true)
         logsSincePersist = 0
     }
@@ -658,16 +665,19 @@ public final class LiveState: ObservableObject {
         UserDefaults.standard.set(tail, forKey: tailKey)
     }
 
-    /// Snapshot `log` (a value copy, safe to hand off) and enqueue the UserDefaults write on
-    /// `persistQueue`, off the main actor. Callers on the main actor only.
+    /// Snapshot the tail of `log` (a value copy, safe to hand off — trimmed to `tailLimit` BEFORE the hop,
+    /// since `persistTail` only ever keeps the last `tailLimit` lines anyway; no reason to copy up to
+    /// `maxLogLines` strings on the main actor just to truncate them off-actor a moment later) and enqueue
+    /// the UserDefaults write on `persistQueue`, off the main actor. Callers on the main actor only.
     ///
     /// `wait`: false for the periodic mid-session mirror (`append`) — no deadline, so don't block the
     /// caller. TRUE for the disconnect flush (`clearBiometrics`) — the process may be about to terminate,
-    /// so this must complete before returning (see that call site's comment), AND `persistQueue` being
-    /// serial means the `.sync` submission still drains strictly after any earlier `.async` mirror already
-    /// queued, so the disconnect flush can never be overwritten by a late-finishing periodic one.
+    /// so the `UserDefaults.set` call must be ISSUED before returning (see that call site's comment for
+    /// what this can and can't actually guarantee), AND `persistQueue` being serial means the `.sync`
+    /// submission still drains strictly after any earlier `.async` mirror already queued, so the disconnect
+    /// flush can never be overwritten by a late-finishing periodic one.
     private func enqueuePersistTail(wait: Bool = false) {
-        let snapshot = log
+        let snapshot = log.count > Self.tailLimit ? Array(log.suffix(Self.tailLimit)) : log
         if wait {
             Self.persistQueue.sync { Self.persistTail(snapshot) }
         } else {
