@@ -343,16 +343,25 @@ final class AppModel: ObservableObject {
         // , a full repo.refresh (~50 store reads) + analyzeRecent , and every one re-fired TodayView's
         // ~50-read loadAll, all contending with the backfill's bulk writes on the single-connection store.
         // On a heavy + actively-syncing history that stacked into a ~10s freeze. `.debounce` collapses the
-        // slice storm: it suppresses the intermediate emissions and fires ONCE, 2s after the stream goes
-        // quiet , i.e. after the LAST slice lands (the backfill is done). Crucially it ALWAYS delivers the
+        // slice storm: it suppresses the intermediate emissions and fires ONCE after the stream goes quiet
+        // , i.e. after the LAST slice lands (the backfill is done). Crucially it ALWAYS delivers the
         // trailing edge, so the dashboard still refreshes with the newly-synced data , freshness is kept,
         // we just stop re-doing it dozens of times mid-download. removeDuplicates() still drops a slice that
         // stamped an identical second; the trailing refresh after a real change is never dropped.
+        //
+        // #1005-STORM (2026-08-23): 2s was tuned only for the gap WITHIN one auto-continue burst — chunks
+        // in a burst land back-to-back. It does nothing for the gap BETWEEN sessions: a device log showed
+        // the periodic timer + auto-continue kicking a fresh offload session every ~8-10 min all day, each
+        // ending in its own `lastSyncedAt` stamp more than 2s after the last, so each one still fired a full
+        // analyzeRecent pass (measured ~48s; up to 573s when it overlapped the NEXT offload — see
+        // `refreshAfterCompletedBackfill`'s `backfilling` guard). 21.5 of 47 measured minutes were re-score
+        // CPU. Raised to 30s so a whole burst of near-back-to-back sessions (auto-continue's own gap is
+        // usually well under this) collapses into ONE pass instead of one per session.
         live.$lastSyncedAt
             .dropFirst()
             .compactMap { $0 }
             .removeDuplicates()
-            .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+            .debounce(for: .seconds(30), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { [weak self] in await self?.refreshAfterCompletedBackfill() }
             }
@@ -574,6 +583,19 @@ final class AppModel: ObservableObject {
     #endif
 
     private func refreshAfterCompletedBackfill() async {
+        // #1005-STORM: never analyze while ANOTHER offload session is already in flight. The 30s debounce
+        // above coalesces a single burst, but the periodic timer / auto-continue can start a fresh session
+        // right as this fires — measured on-device, a pass overlapping two such sessions (9 rows total)
+        // took 573s vs. the usual ~48s, an ~12x inflation (GRDB writer + main-actor contention with
+        // `Backfiller.ingest`, exact split not isolated). Poll-and-wait rather than drop: `live.backfilling`
+        // flips (as documented at BLEManager) so a fixed sleep can't be sized, but a bounded poll mirrors the
+        // existing `hasActiveImport` wait below in this same file. Bounded so a stuck `backfilling` flag
+        // can't starve the dashboard refresh forever.
+        var backfillWaited = 0
+        while live.backfilling && !Task.isCancelled && backfillWaited < 120 {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 s, re-check; ~2 min cap then proceed
+            backfillWaited += 1
+        }
         live.append(log: "Backfill: refreshing dashboard cache from completed sync")
         await repo.refresh(days: 120)
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute
