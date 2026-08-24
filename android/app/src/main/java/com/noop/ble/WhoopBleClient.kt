@@ -749,18 +749,17 @@ class WhoopBleClient(
         /** 5/MG zero-frame retry: pause before re-requesting history when a session timed out having
          *  produced nothing (the first request after connect can go entirely unanswered). */
         private const val WHOOP5_HISTORY_RETRY_DELAY_MS = 700L
-        /** Delay between a committed backfill chunk and the on-device scoring pass it schedules.
-         *  #1005-STORM (2026-08-23): raised from 1_500L. NOT a byte-identical twin of the Swift
-         *  `AppModel` fix — that side uses a Combine `.debounce`, which is TRAILING-edge and RESETS on
-         *  every event (fires N ms after the LAST chunk of a burst). This is LEADING-edge with a lockout
-         *  ([analyzeAfterBackfillScheduled]): the delay starts at the FIRST chunk after any prior pass
-         *  completed, and does not reset if more chunks land during the wait — so a burst longer than
-         *  this window can still see the pass fire mid-burst rather than after it quiets, unlike Swift.
-         *  Still raised because the goal (fewer, larger-spaced passes instead of one near-every-chunk)
-         *  holds either way, and the accompanying `IntelligenceEngine.isAnalyzing` guard in [requestSync]
-         *  above is the change that actually prevents session overlap. Not behaviourally verified — this
-         *  module cannot be compiled/run in this environment (see CLAUDE.md). */
-        private const val POST_BACKFILL_ANALYZE_DELAY_MS = 30_000L
+        /** Debounce between a committed backfill chunk and the on-device scoring pass it schedules.
+         *  #1005-STORM (2026-08-23): considered raising this to match the Swift 2s->30s debounce change,
+         *  then reverted the idea. This is LEADING-edge with a lockout ([analyzeAfterBackfillScheduled]),
+         *  not trailing-edge-with-reset like Swift's Combine `.debounce` — raising it here would NOT
+         *  reproduce the Swift fix's actual effect (collapsing a burst into one pass fired after it
+         *  quiets); it would just make every pass start later for no coalescing benefit, a behavior
+         *  change with no verifiable upside in a module that cannot be compiled/run in this environment
+         *  (see CLAUDE.md). The change that actually matters ported cleanly: `IntelligenceEngine.isAnalyzing`
+         *  + the [requestSync] guard above, which is a real gate, not a timing tweak. Left at its
+         *  original value. */
+        private const val POST_BACKFILL_ANALYZE_DELAY_MS = 1_500L
         /** #174: window after the last offload frame/HISTORY_COMPLETE during which a type-0x2F frame is
          *  treated as trailing-historical, not live. Mirrors macOS deepPacketLiveCooldownSeconds (10s). */
         private const val DEEP_PACKET_LIVE_COOLDOWN_MS = 10_000L
@@ -7133,8 +7132,9 @@ class WhoopBleClient(
         if (!canRequestSync(s.connected, s.bonded, backfilling)) return
         // #1005-STORM: while a rescore (IntelligenceEngine.analyzeRecent) is in flight, defer the two
         // CADENCE-driven automatic triggers — a pass overlapping a fresh offload session measured 573s vs.
-        // the usual ~48s (12x) on the Swift side, most likely store-writer / thread contention between the
-        // two concurrent workloads. Only PERIODIC/STRAP defer: no user-facing urgency, each simply re-fires
+        // the usual ~48s (12x) on the Swift side; mechanism not isolated, only the correlation is confirmed
+        // (see the Swift `AppModel.refreshAfterCompletedBackfill` doc comment). Only PERIODIC/STRAP defer:
+        // no user-facing urgency, each simply re-fires
         // on its own next tick, so a skip here is silent and harmless. MANUAL/CONNECT/FOREGROUND (a user
         // actively watching) and AUTO_CONTINUE (mid-drain of an ALREADY-STARTED session — deferring would
         // strand it half-drained) all still run unconditionally, matching how BackfillPolicy's existing

@@ -3898,8 +3898,9 @@ public final class BLEManager: NSObject, ObservableObject {
             connected: state.connected, bonded: state.bonded, backfilling: backfilling) else { return }
         // #1005-STORM: while a rescore (IntelligenceEngine.analyzeRecent) is in flight, defer the two
         // CADENCE-driven automatic triggers — a pass overlapping a fresh offload session measured 573s vs.
-        // the usual ~48s (12x), most likely GRDB writer / main-actor contention between the two concurrent
-        // workloads. Only `.periodic`/`.strap` defer: they have no user-facing urgency and each simply
+        // the usual ~48s (12x); mechanism not isolated (see AppModel.refreshAfterCompletedBackfill's doc
+        // comment), only the correlation is confirmed. Only `.periodic`/`.strap` defer: they have no
+        // user-facing urgency and each simply
         // re-fires on its own next tick, so a skip here is silent and harmless. `.manual` (user tapped
         // "Sync now"), `.connect`/`.foreground` (a fresh connection/app-open a user is actively watching),
         // and `.autoContinue` (mid-drain of an ALREADY-STARTED session — deferring would strand it

@@ -402,8 +402,9 @@ public final class LiveState: ObservableObject {
     @Published public var backfilling = false
     /// #1005-STORM: true while `IntelligenceEngine.analyzeRecent` holds its `computing` lock, mirrored here
     /// so `BLEManager.requestSync` can defer starting a NEW automatic backfill session while a rescore is
-    /// in flight — a pass overlapping a fresh offload session measured 573s vs. the usual ~48s (12x), most
-    /// likely GRDB writer / main-actor contention between the two concurrent workloads. `IntelligenceEngine`
+    /// in flight — a pass overlapping a fresh offload session measured 573s vs. the usual ~48s (12x);
+    /// mechanism not isolated (only the correlation is confirmed from the device log — see
+    /// `AppModel.refreshAfterCompletedBackfill`'s doc comment). `IntelligenceEngine`
     /// has no reference to `BLEManager` (and shouldn't gain one — BLE staying analytics-independent is
     /// intentional), so `AppModel` — which owns both — mirrors `computing`'s edges here as the one shared,
     /// already-@MainActor signal both sides can see. `.manual`/`.connect`/`.foreground` still bypass this

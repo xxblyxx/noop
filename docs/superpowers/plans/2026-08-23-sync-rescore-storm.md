@@ -211,6 +211,51 @@ is documented as a clamped 0…1 fraction. No new colors, fonts or spacing.
   Commit 5 as "notify if a deferred pass completes in the background," not "processing reliably
   finishes in the background."
 
+## Corrections made during implementation (2026-08-23)
+
+Real defects found in this branch's own commits, mid-implementation, by an independent second-opinion
+review — recorded honestly rather than silently amended:
+
+1. **The overlap guard first committed (`59771a02`) only checked one direction.** It waited for
+   `live.backfilling` to clear before *starting* an analyze pass, but did nothing to stop a *new*
+   backfill session from starting while a pass was already running — which is what the measured 573s
+   case actually was (sessions at 19:11:08 and 19:18:15 both landed inside the still-running
+   19:09:11→19:18:46 pass). Fixed in `5478d84f` by adding `LiveState.analyzing` (mirrored from
+   `IntelligenceEngine.computing`) so `BLEManager.requestSync` can defer `.periodic`/`.strap` triggers
+   while a pass is in flight, plus a Kotlin twin (`IntelligenceEngine.isAnalyzing`, backed by
+   `analyzeGate.isLocked`).
+2. **That fix had its own gap**, found on a second review pass: `live.analyzing` only reflects
+   `computing`, which `analyzeRecent` sets *after* its own guard checks — but the caller
+   (`refreshAfterCompletedBackfill`) runs `repo.refresh(days: 120)` (~50 store reads) *before* even
+   calling `analyzeRecent`. During that span `backfilling` was already false and `analyzing` was still
+   false, reopening the same overlap window from a different angle. Fixed in `397012e8` by having
+   `refreshAfterCompletedBackfill` claim `live.analyzing` manually (with `defer` to release it),
+   spanning both `repo.refresh` and `analyzeRecent`.
+3. **A remaining, pre-existing, NOT-fixed race**, found on a third review pass: inside
+   `analyzeRecent` itself, `computing = true` is set at `IntelligenceEngine.swift:529`, but two `await`
+   points precede it — `repo.storeHandle()` (`:475`) and `store.hrFingerprint()` (`:496`). Two
+   `analyzeRecent` callers landing close together (e.g. the 30-minute backstop firing right as a
+   post-offload call starts) could both pass the `guard !computing` check at `:474` before either sets
+   `computing = true`, and both then run a full concurrent pass. This predates this branch entirely —
+   it is not something introduced or fixed here. **Not fixed**: the `#899-A` re-arm mechanism
+   (`pendingForcedRescore`) already exists specifically to handle a *detected* collision safely by
+   serializing a re-run rather than corrupting state, so the failure mode here is wasted CPU (two
+   passes at once), not a correctness bug — lower priority, and a real fix (moving the check-and-set
+   inside a single non-suspending scope, or using an actor) is more surgery than this session's budget
+   allows to do carefully. Left for a future session.
+4. **Two attribution overclaims caught and corrected**: several comments stated "GRDB writer / main-actor
+   contention" as the confirmed *mechanism* behind the 48s→573s inflation. Only the *correlation*
+   (overlap present ⇒ pass much slower) is actually confirmed from the device log; the mechanism was
+   never isolated. Comments in `AppModel.swift`, `BLEManager.swift`, `LiveState.swift`, and
+   `WhoopBleClient.kt` were corrected to say so plainly.
+5. **An unverifiable Kotlin change reverted**: `POST_BACKFILL_ANALYZE_DELAY_MS` was raised 1.5s→30s to
+   "match" the Swift debounce change, but Android's mechanism (leading-edge with a lockout) doesn't
+   behave like Swift's (trailing-edge, resets per event) — raising the constant wouldn't reproduce the
+   Swift fix's actual effect and would just delay every pass with no coalescing benefit, in a module
+   that cannot be compiled or tested in this environment. Reverted to its original value; the real fix
+   (`IntelligenceEngine.isAnalyzing` + the `requestSync` guard) ported cleanly and is what actually
+   matters.
+
 ## Also found, deliberately NOT in scope
 
 - **`2853884e`** (`perf(analyzeRecent): stop the #1005 cache churning…`) added **only two test files**;

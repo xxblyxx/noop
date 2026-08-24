@@ -593,8 +593,11 @@ final class AppModel: ObservableObject {
         // #1005-STORM: never analyze while ANOTHER offload session is already in flight. The 30s debounce
         // above coalesces a single burst, but the periodic timer / auto-continue can start a fresh session
         // right as this fires — measured on-device, a pass overlapping two such sessions (9 rows total)
-        // took 573s vs. the usual ~48s, an ~12x inflation (GRDB writer + main-actor contention with
-        // `Backfiller.ingest`, exact split not isolated). Poll-and-wait rather than drop: `live.backfilling`
+        // took 573s vs. the usual ~48s, a ~12x inflation. Mechanism NOT isolated (candidates: GRDB writer
+        // contention, main-actor contention with `Backfiller.ingest`, thermal throttling from the sustained
+        // load) — only the correlation (overlap present ⇒ pass much slower) is confirmed from the log; this
+        // fix removes the overlap regardless of which mechanism is actually responsible. Poll-and-wait
+        // rather than drop: `live.backfilling`
         // flips (as documented at BLEManager) so a fixed sleep can't be sized, but a bounded poll mirrors the
         // existing `hasActiveImport` wait below in this same file. Bounded so a stuck `backfilling` flag
         // can't starve the dashboard refresh forever.
