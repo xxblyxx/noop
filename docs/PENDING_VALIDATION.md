@@ -149,6 +149,44 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   seconds the strap claimed 0 beats for still hold their live rows.
 - check-after: 2026-08-21
 
+### The sync-rescore-storm fix reduces re-score CPU and Commit 5's BGProcessingTask actually fires
+- id: sync-rescore-storm-fix
+- shipped: `fix/sync-rescore-storm` branch, commits `59771a02`..`3f434482` (#1005-STORM), 2026-08-23
+  — pending merge to `main`
+- claim: the five commits together turn the measured re-score storm (10 passes / 21.5 min of
+  re-score CPU in a 47-minute window, one 573s pass from a 12x overlap inflation) into ≤2 passes /
+  <2 min with no overlapping pass, AND Commit 5's `SyncAnalyzeBackgroundScheduler` fires and scores
+  a deferred night when the strap disconnects right after HISTORY_COMPLETE before the foreground
+  analyze pass (`refreshAfterCompletedBackfill`) gets to run.
+- needs: a real morning sync against a repopulated store from a live overnight WHOOP offload.
+  Confirming Commit 5 specifically needs the narrower case: the strap coming off / going out of
+  range right after HISTORY_COMPLETE while NOOP is backgrounded, before its 30s post-offload
+  debounce fires.
+- blocked-because: implemented same-day, 2026-08-23; no morning sync has occurred yet on this build.
+- check:
+  ```
+  xcrun devicectl device copy from --device 819D37A3-B45A-56CF-9FEC-40D460EC74F8 \
+    --domain-type appDataContainer --domain-identifier com.bly.noop \
+    --source "Library/Preferences/com.bly.noop.plist" --destination /tmp/prefs.plist
+  ```
+  then in `strapLog.tail`: count `re-score: done` lines and sum their durations per sync window, and
+  separately grep for `background analyze:` (Commit 5's own log tag, added specifically so this
+  check can tell "never fired" apart from "fired and no-opped") to see whether/how often the
+  BGProcessingTask ran.
+- passes-if: | metric | baseline (2026-08-23) | target |
+  |---|---|---|
+  | re-score passes per ~47 min | 10 | ≤ 2 |
+  | total re-score CPU per ~47 min | 21.5 min | < 2 min |
+  | passes overlapping a backfill | 1 (573 s) | **0** |
+  | worst single pass | 573 s | ≤ 60 s |
+
+  For Commit 5: if any `background analyze:` line appears, `scored=true` only on a pass that
+  genuinely had nothing scored yet (not on every backgrounding), and at most one "Sync complete"
+  notification per deferred night. A build with no qualifying disconnect during the check window may
+  legitimately show zero `background analyze:` lines — that is not itself a failure, just untested;
+  note it rather than treating it as a pass.
+- check-after: 2026-08-24
+
 ## Settled
 
 _(nothing yet)_

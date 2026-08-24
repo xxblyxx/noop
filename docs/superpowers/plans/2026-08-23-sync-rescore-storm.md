@@ -255,6 +255,30 @@ review — recorded honestly rather than silently amended:
    that cannot be compiled or tested in this environment. Reverted to its original value; the real fix
    (`IntelligenceEngine.isAnalyzing` + the `requestSync` guard) ported cleanly and is what actually
    matters.
+6. **Commit 5's actual scope narrowed from the plan text above, on second-opinion review before
+   writing it.** The plan named the strap-disconnecting-right-after-HISTORY_COMPLETE case only in
+   passing; the review made it the load-bearing justification, because it's the ONLY case
+   `bluetooth-central` doesn't already cover (a still-connected session keeps the process alive for
+   Commits 1–4 to run in, backgrounded or not — see `AppModel.swift:661-667`'s existing #980 comment).
+   Two changes that fell out of naming that case precisely:
+   - `analyzeRecent(force: false)` (the existing whole-store `hrFingerprint()` gate, still unrepaired
+     per correction #3 above) instead of `force: true` / `skipIfUnchanged: true`. Live HR defeats this
+     gate in the FOREGROUND case the plan diagnosed — but nothing streams while the app is suspended,
+     so the gate is trustworthy for exactly this caller. Wrapped as `IntelligenceEngine.analyzeIfStale()
+     -> Bool` so the background handler can tell a real pass apart from a no-op without duplicating the
+     private watermark key.
+   - The scheduler does **not** self-re-arm inside its own task body (unlike
+     `HealthWritebackBackgroundScheduler`, which always has plausible work while HealthKit stays
+     authorized). An analyze wake is usually a no-op; `schedule()` is called once per `.background`
+     scene transition instead, so a request only exists when the app might have left something
+     unscored — not as a standing cadence.
+   - `AppModel.runBackgroundAnalyze()` unconditionally logs its outcome via `live.append(log:)` (scored
+     true/false) — opportunistic `BGProcessingTask` scheduling means "never fired" and "fired and
+     no-opped" are otherwise indistinguishable from the device later.
+   - Confirmed before editing `project.yml` that `xcodegen generate` merges its `info.properties` block
+     into the physical `StrandiOS/Resources/Info.plist` (the file `INFOPLIST_FILE` actually points at,
+     `GENERATE_INFOPLIST_FILE: NO`) rather than the properties being shadowed by a stale checked-in
+     file — verified the plist byte-for-byte after regenerating.
 
 ## Also found, deliberately NOT in scope
 
