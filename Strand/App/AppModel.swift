@@ -212,6 +212,13 @@ final class AppModel: ObservableObject {
         // was computed per day. `live` is captured strongly (created just above) , the engine outlives the
         // app session, so there's no retain-cycle risk worth a weak dance here. (Sleep overhaul §2.5.)
         self.intelligence.diagnosticSink = { [live] line, domain in live.append(log: line, domain: domain) }
+        // #1005-STORM: mirror the engine's `computing` lock onto `live.analyzing` so BLEManager (which has
+        // no reference to IntelligenceEngine, by design) can defer starting a NEW automatic backfill
+        // session while a rescore is in flight — see `live.analyzing`'s doc comment for why this exists.
+        self.intelligence.$computing
+            .removeDuplicates()
+            .sink { [live] computing in live.analyzing = computing }
+            .store(in: &hrCancellables)
         // Workouts & GPS test mode (Test Centre): wire the Repository (auto-detect inputs/why + cross-source
         // dedup decisions) and the GPS recorder (fix-progress) tagged sinks to the SAME shareable strap log.
         // Each emitter re-checks `TestCentre.active(.workouts)` before building a line, so these wirings are

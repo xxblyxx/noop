@@ -3896,6 +3896,20 @@ public final class BLEManager: NSObject, ObservableObject {
     func requestSync(_ trigger: BackfillTrigger) {
         guard BLEManager.shouldRunPeriodicBackfill(
             connected: state.connected, bonded: state.bonded, backfilling: backfilling) else { return }
+        // #1005-STORM: while a rescore (IntelligenceEngine.analyzeRecent) is in flight, defer the two
+        // CADENCE-driven automatic triggers — a pass overlapping a fresh offload session measured 573s vs.
+        // the usual ~48s (12x), most likely GRDB writer / main-actor contention between the two concurrent
+        // workloads. Only `.periodic`/`.strap` defer: they have no user-facing urgency and each simply
+        // re-fires on its own next tick, so a skip here is silent and harmless. `.manual` (user tapped
+        // "Sync now"), `.connect`/`.foreground` (a fresh connection/app-open a user is actively watching),
+        // and `.autoContinue` (mid-drain of an ALREADY-STARTED session — deferring would strand it
+        // half-drained) all still run unconditionally, matching how `BackfillPolicy`'s existing floors treat
+        // those same four triggers as "never delayed". See `live.analyzing`'s doc comment (LiveState.swift)
+        // for why BLEManager can see this at all.
+        if (trigger == .periodic || trigger == .strap), state.analyzing {
+            log("Backfill: \(trigger) deferred (a rescore is in flight)")
+            return
+        }
         let now = Date().timeIntervalSince1970
         let last = UserDefaults.standard.object(forKey: BLEManager.backfillLastAtKey) as? Double
         // #160: a future-dated-clock strap's recurring automatic offloads (#928/#1012) are near-useless

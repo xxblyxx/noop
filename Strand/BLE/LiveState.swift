@@ -400,6 +400,15 @@ public final class LiveState: ObservableObject {
     /// True while a historical offload session is running, so screens can say "Syncing strap
     /// history…" instead of presenting half-loaded data as final (#77).
     @Published public var backfilling = false
+    /// #1005-STORM: true while `IntelligenceEngine.analyzeRecent` holds its `computing` lock, mirrored here
+    /// so `BLEManager.requestSync` can defer starting a NEW automatic backfill session while a rescore is
+    /// in flight — a pass overlapping a fresh offload session measured 573s vs. the usual ~48s (12x), most
+    /// likely GRDB writer / main-actor contention between the two concurrent workloads. `IntelligenceEngine`
+    /// has no reference to `BLEManager` (and shouldn't gain one — BLE staying analytics-independent is
+    /// intentional), so `AppModel` — which owns both — mirrors `computing`'s edges here as the one shared,
+    /// already-@MainActor signal both sides can see. `.manual`/`.connect`/`.foreground` still bypass this
+    /// (see `BackfillPolicy` — an automatic-trigger-only deferral, never a user-visible one).
+    @Published public var analyzing = false
     /// Chunks acked during the current offload session — an honest progress signal (total pending is
     /// unknowable from the protocol, so a count, never a percent).
     @Published public var syncChunksThisSession: Int = 0

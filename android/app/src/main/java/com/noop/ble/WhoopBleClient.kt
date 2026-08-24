@@ -749,8 +749,18 @@ class WhoopBleClient(
         /** 5/MG zero-frame retry: pause before re-requesting history when a session timed out having
          *  produced nothing (the first request after connect can go entirely unanswered). */
         private const val WHOOP5_HISTORY_RETRY_DELAY_MS = 700L
-        /** Debounce between a committed backfill chunk and the on-device scoring pass it schedules. */
-        private const val POST_BACKFILL_ANALYZE_DELAY_MS = 1_500L
+        /** Delay between a committed backfill chunk and the on-device scoring pass it schedules.
+         *  #1005-STORM (2026-08-23): raised from 1_500L. NOT a byte-identical twin of the Swift
+         *  `AppModel` fix — that side uses a Combine `.debounce`, which is TRAILING-edge and RESETS on
+         *  every event (fires N ms after the LAST chunk of a burst). This is LEADING-edge with a lockout
+         *  ([analyzeAfterBackfillScheduled]): the delay starts at the FIRST chunk after any prior pass
+         *  completed, and does not reset if more chunks land during the wait — so a burst longer than
+         *  this window can still see the pass fire mid-burst rather than after it quiets, unlike Swift.
+         *  Still raised because the goal (fewer, larger-spaced passes instead of one near-every-chunk)
+         *  holds either way, and the accompanying `IntelligenceEngine.isAnalyzing` guard in [requestSync]
+         *  above is the change that actually prevents session overlap. Not behaviourally verified — this
+         *  module cannot be compiled/run in this environment (see CLAUDE.md). */
+        private const val POST_BACKFILL_ANALYZE_DELAY_MS = 30_000L
         /** #174: window after the last offload frame/HISTORY_COMPLETE during which a type-0x2F frame is
          *  treated as trailing-historical, not live. Mirrors macOS deepPacketLiveCooldownSeconds (10s). */
         private const val DEEP_PACKET_LIVE_COOLDOWN_MS = 10_000L
@@ -7112,6 +7122,22 @@ class WhoopBleClient(
     private fun requestSync(trigger: BackfillTrigger) {
         val s = _state.value
         if (!canRequestSync(s.connected, s.bonded, backfilling)) return
+        // #1005-STORM: while a rescore (IntelligenceEngine.analyzeRecent) is in flight, defer the two
+        // CADENCE-driven automatic triggers — a pass overlapping a fresh offload session measured 573s vs.
+        // the usual ~48s (12x) on the Swift side, most likely store-writer / thread contention between the
+        // two concurrent workloads. Only PERIODIC/STRAP defer: no user-facing urgency, each simply re-fires
+        // on its own next tick, so a skip here is silent and harmless. MANUAL/CONNECT/FOREGROUND (a user
+        // actively watching) and AUTO_CONTINUE (mid-drain of an ALREADY-STARTED session — deferring would
+        // strand it half-drained) all still run unconditionally, matching how BackfillPolicy's existing
+        // floors treat those same four triggers. Twin of Swift `BLEManager.requestSync`'s `state.analyzing`
+        // guard — polled directly from IntelligenceEngine rather than mirrored through _state, since this
+        // class already imports the engine and a direct read can't go stale the way a mirrored copy could.
+        if ((trigger == BackfillTrigger.PERIODIC || trigger == BackfillTrigger.STRAP) &&
+            IntelligenceEngine.isAnalyzing
+        ) {
+            log("Backfill: $trigger deferred (a rescore is in flight)")
+            return
+        }
         val clockUntrusted = isFutureDatedNewest(strapNewestTs, System.currentTimeMillis() / 1000L)
         if (!BackfillPolicy.shouldRun(
                 trigger = trigger,

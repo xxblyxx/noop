@@ -59,6 +59,11 @@ object IntelligenceEngine {
      */
     private val analyzeGate = Mutex()
 
+    /** #1005-STORM: true while [analyzeGate] is held. Twin of Swift `IntelligenceEngine.computing`
+     *  (mirrored onto `LiveState.analyzing` there); here [WhoopBleClient.requestSync] polls this directly
+     *  since Android's engine is a stateless `object` with no `@Published`-equivalent emission point. */
+    val isAnalyzing: Boolean get() = analyzeGate.isLocked
+
     /**
      * #1005 BATTERY: in-memory per-day reuse for [analyzeRecent]'s pass-1 loop, keyed by day. On a heavy user
      * (21 nights, ~178 k HR rows/night, a 1.26 GB store) every re-score re-read *every* night's raw streams
