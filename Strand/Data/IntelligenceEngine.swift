@@ -534,8 +534,16 @@ final class IntelligenceEngine: ObservableObject {
         // `computing` is already false, so its own `guard !computing` passes and it rescores the new data.
         defer {
             computing = false
-            if pendingForcedRescore {
-                pendingForcedRescore = false
+            // #1005-STORM (review finding #5): don't re-arm a fresh, equally uncancellable pass off the
+            // back of one that was itself cancelled (a BGProcessingTask expiring mid-pass) — that would
+            // just spawn another pass with no cancellation-awareness of its own initial trigger having
+            // already given up. Clear the flag unconditionally so it can't leak into some later,
+            // unrelated pass's defer and trigger a spurious extra rescore; a genuinely pending forced
+            // rescore will be re-requested by whatever caller needed it once the app is foregrounded or
+            // the next real trigger fires.
+            let wasPendingForcedRescore = pendingForcedRescore
+            pendingForcedRescore = false
+            if wasPendingForcedRescore, !Task.isCancelled {
                 // Carry THIS pass's window into the re-pass: a heal firing during a wide one-shot pass
                 // must re-score the same width, not the default 21 days (Kotlin re-passes with the same
                 // maxDays; keep the platforms in lockstep).
@@ -709,8 +717,19 @@ final class IntelligenceEngine: ObservableObject {
         }
         let inDayScanCache = dayScanCache
 
-        let (scanned, skippedDayLines, updatedDayScanCache):
-            ([DayScan], [String], [String: (key: String, scan: DayScan)]) = await Task.detached(priority: .utility) {
+        // #1005-STORM (review finding #5): bound to a local `let` and wrapped in
+        // `withTaskCancellationHandler` so cancelling the outer `analyzeRecent` Task (e.g. a
+        // `BGProcessingTask` expiring) actually propagates here — `Task.detached` is NOT a structured
+        // child of the calling task, so a plain `await ... .value` (the previous shape) left this scan
+        // running to completion uncoordinated with the caller's cancellation, even after
+        // `SyncAnalyzeBackgroundScheduler`'s `expirationHandler` had already reported the task done to
+        // iOS. The loop below checks `Task.isCancelled` per day and `break`s early rather than
+        // `throw`ing, so the closure's own signature doesn't need to change. This is the dominant-cost
+        // detached task (the per-day scoring loop this whole investigation measured at ~48s/pass) and
+        // the one this fix targets; a smaller, separate `Task.detached` further down (steps-calibration)
+        // is NOT touched here — same reasoning as the plan's scope note: cancellation-checking every
+        // per-day computation in this file is a larger change than this finding calls for.
+        let scanTask = Task.detached(priority: .utility) { () -> ([DayScan], [String], [String: (key: String, scan: DayScan)]) in
             var out: [DayScan] = []
             // Days skipped below (too few HR samples) never get a DayScan, so this diagnostic can't ride
             // along on one; carried out alongside `out` and replayed through `diagnosticSink` on the main
@@ -728,6 +747,14 @@ final class IntelligenceEngine: ObservableObject {
             var dayScanCacheLocal = inDayScanCache
             var dayCacheReused = 0
             for offset in 0..<maxDays {
+                // #1005-STORM (review finding #5): cooperative cancellation. `scanTask` does NOT
+                // auto-inherit cancellation (`Task.detached` is deliberately not a structured child) —
+                // `withTaskCancellationHandler` above calls `scanTask.cancel()` explicitly when the
+                // caller (e.g. a `BGProcessingTask` whose `expirationHandler` fired) is cancelled, which
+                // is what makes `Task.isCancelled` true HERE. `break`, not `throw` — return whatever was
+                // scored so far (a partial `out`) so a cancelled pass still yields usable results for the
+                // days it got to, rather than discarding them.
+                if Task.isCancelled { break }
                 let dayStart = nowLocalMidnight - offset * 86_400
                 let day = AnalyticsEngine.dayString(dayStart, offsetSec: tzOffset)
                 // Read a generous window around the night that ends on `day`; the stager finds the span.
@@ -1230,7 +1257,12 @@ final class IntelligenceEngine: ObservableObject {
             skippedDayLines.append("analyzeRecent dayCache reused=\(dayCacheReused)/\(maxDays) "
                                    + "size=\(dayScanCacheLocal.count)")
             return (out, skippedDayLines, dayScanCacheLocal)
-        }.value
+        }
+        let (scanned, skippedDayLines, updatedDayScanCache) = await withTaskCancellationHandler {
+            await scanTask.value
+        } onCancel: {
+            scanTask.cancel()
+        }
         // #1005: write the loop's updated reuse cache back to the (main-actor) stored property. The pass ran
         // to completion above (`.value` awaited), so there is no concurrent access.
         dayScanCache = updatedDayScanCache
@@ -2091,7 +2123,12 @@ final class IntelligenceEngine: ObservableObject {
         // #836: record the raw-HR fingerprint this run scored against, so a later NON-forced tick can
         // short-circuit while it's unchanged. Written ONLY here at the end of a completed run (never on an
         // early guard-return), so an interrupted/failed run can't advance the watermark past unscored data.
-        if !wmKey.isEmpty { UserDefaults.standard.set(wmKey, forKey: Self.analyzeWatermarkKey) }
+        // #1005-STORM (review finding #5): that guarantee used to only hold for guard-return/throw paths —
+        // a task CANCELLATION (a BGProcessingTask expiring mid-pass) was never checked anywhere in this
+        // function, so a cancelled run reached here and wrote the watermark anyway, marking the whole
+        // fingerprint "done" even though the day-loop above may have `break`-ed out early on a partial
+        // scan. Guarding on `!Task.isCancelled` is what actually makes the comment above true now.
+        if !wmKey.isEmpty, !Task.isCancelled { UserDefaults.standard.set(wmKey, forKey: Self.analyzeWatermarkKey) }
         diagnosticSink?("re-score: done — scored \(scoredNights.count) night(s) in \(Int(Date().timeIntervalSince(reScoreStart) * 1000)) ms (#1005)", nil)
     }
 
