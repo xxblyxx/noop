@@ -73,6 +73,13 @@ final class WatchSessionBridge: NSObject, ObservableObject {
     /// `async` because Rest (sleep_performance) lives in a computed metric series rather than a
     /// `DailyMetric` column, so it needs an `exploreSeries` read (mirrors `WidgetSnapshot.publish`).
     func sendLatest(from model: AppModel) async {
+        // #1005-STORM: check the SPACING half of the gate before building anything — it needs only
+        // `lastPushedAt`, not the snapshot, so a caller that fires more often than `minPushInterval` (the
+        // post-sync chain can, per offload session) skips the `exploreSeries` read + `widgetAnchor` scans
+        // entirely instead of building a snapshot only to discard it. The CONTENT half (`headlineChanged`)
+        // still needs the built snapshot, so it stays in `shouldPush` after `buildSnapshot` below.
+        let now = Date()
+        if let at = lastPushedAt, now.timeIntervalSince(at) < Self.minPushInterval { return }
         let snap = await Self.buildSnapshot(from: model)
         // A contentless snapshot (a cold launch races the first repo refresh, so `days` is still empty)
         // must NOT push: it would stomp the watch's last REAL data with the empty state AND burn the
@@ -81,7 +88,6 @@ final class WatchSessionBridge: NSObject, ObservableObject {
         let contentless = snap.scoreDay == nil && snap.charge == nil && snap.effort == nil
             && snap.rest == nil && snap.sleepSummary.isEmpty
         if contentless { return }
-        let now = Date()
         guard shouldPush(snap, now: now) else { return }
         lastPushedAt = now
         send(snap)
