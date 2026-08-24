@@ -50,6 +50,7 @@ struct StrandApp: App {
                 .environmentObject(model.behavior)
                 .environmentObject(model.intelligence)
                 .environmentObject(model.coach)
+                .environmentObject(model.syncProgress)   // #1005-STORM: the Today sync/analyze progress bar
                 .environmentObject(router)
                 .environmentObject(UpdateStore.shared)
                 // v5 L3: the shared stress check-in nudge surface, so the Breathe screen's passive

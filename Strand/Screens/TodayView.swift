@@ -1293,6 +1293,12 @@ struct TodayView: View {
                        topBackground: showDayCycleBackground
                            ? AnyView(SceneScreenBackground(hour: demoSceneHour)) : nil) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                // #1005-STORM: renders nothing while idle. `ScreenScaffold` has no pinned-top slot outside
+                // its horizontal padding (no house precedent for `.safeAreaInset(edge: .top)` — see
+                // docs/superpowers/plans/2026-08-23-sync-rescore-storm.md, Commit 4), so this sits first in
+                // the padded content column rather than truly edge-to-edge. `LiquidTodayView` (the default
+                // Today on both platforms) gets the full edge-to-edge placement; this is the fallback.
+                SyncProgressBar()
                 #if os(iOS)
                 // Compact top bar: profile/settings (left) · ‹ Today › day-nav (centre, bold) · strap
                 // battery (right). Replaces the big title + the full-width day-nav pill (WHOOP-style).

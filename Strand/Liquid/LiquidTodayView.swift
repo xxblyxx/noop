@@ -275,6 +275,11 @@ struct LiquidTodayView: View {
 
                 liquidRefreshIndicator   // grows in the revealed space; a vessel filling with the pull
 
+                // #1005-STORM: full-width, edge-to-edge (no horizontal padding — it reads as a status
+                // strip, not a content row), so it sits ABOVE the padded content column below. Renders
+                // nothing while idle (SyncProgressBar's own gate), so this costs nothing outside a sync.
+                SyncProgressBar()
+
                 VStack(alignment: .leading, spacing: 12) {
                     scene
                     // The strain/illness early-warning banner, dropped in the liquid Home rewrite. Liquid is

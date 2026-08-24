@@ -55,6 +55,10 @@ final class AppModel: ObservableObject {
     let behavior = BehaviorStore()
     /// On-device WHOOP-style recovery/strain/sleep computation from raw strap streams.
     let intelligence: IntelligenceEngine
+    /// #1005-STORM: determinate 0…1 "catching up on last night" progress, deliberately separate from
+    /// `LiveState` (see `SyncProgress.swift`'s doc). `BLEManager` drives the offload phase; this class
+    /// drives the analyze phase in `refreshAfterCompletedBackfill`.
+    let syncProgress = SyncProgress()
 
     /// Opt-in AI coach (bring-your-own-key) , the one networked feature, off until the user enables it.
     let coach: AICoachEngine
@@ -204,6 +208,7 @@ final class AppModel: ObservableObject {
         // (write side) and `wireSourceCoordinator → adoptActiveDevice` (read spine, #814) re-point them to
         // the registry active id once the store opens. Single-device install keeps "my-whoop" throughout.
         self.ble = BLEManager(state: live, deviceId: deviceId)
+        self.ble.syncProgress = syncProgress
         self.repo = Repository(deviceId: deviceId)
         self.coach = AICoachEngine(repo: repo)
         self.intelligence = IntelligenceEngine(repo: repo, profile: profile, deviceId: deviceId)
@@ -623,6 +628,11 @@ final class AppModel: ObservableObject {
         // one-shot heals) that don't go through this manual claim.
         live.analyzing = true
         defer { live.analyzing = false }
+        // #1005-STORM: `defer` releases the progress bar (back to `.idle`) on EVERY exit path from this
+        // function — normal completion, an early `return` (none today, but defensive), or task
+        // cancellation at any `await` below (app backgrounded/killed mid-pass). A bar that never resets
+        // would sit at some stale fraction forever on the next real sync.
+        defer { syncProgress.finish() }
         live.append(log: "Backfill: refreshing dashboard cache from completed sync")
         await repo.refresh(days: 120)
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute
@@ -633,6 +643,19 @@ final class AppModel: ObservableObject {
         // duplicate offload (nothing new banked, common on a flapping link) skips the whole-window rescore
         // instead of churning it, which was surfacing as a Trends/streak "0 days" flicker. Only this
         // post-offload caller opts in; every other analyzeRecent path still forces unconditionally.
+        //
+        // #1005-STORM: drive the progress bar's analyze phase with a background tick loop, since
+        // `analyzeRecent` is one opaque `await` with no per-day callback out to here (see `SyncProgress`'s
+        // doc for why — wiring a real per-day signal out of its `Task.detached` loop is out of scope).
+        // Cancelled via the `defer` the instant `analyzeRecent` returns, success or failure.
+        syncProgress.beginAnalyze()
+        let progressTick = Task { [syncProgress] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                await MainActor.run { syncProgress.tickAnalyzeEstimate() }
+            }
+        }
+        defer { progressTick.cancel() }
         await intelligence.analyzeRecent(skipIfUnchanged: true)
         await refreshV5Signals()
         #if os(iOS)

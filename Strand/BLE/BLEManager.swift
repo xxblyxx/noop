@@ -494,6 +494,11 @@ public final class BLEManager: NSObject, ObservableObject {
     public let state: LiveState
     private let router: FrameRouter
     private var collector: Collector?
+    /// #1005-STORM: the "catching up on last night" progress bar's offload-phase driver. Wired by
+    /// `AppModel` (mirrors `diagnosticSink`/`workoutsLog` — a settable hook rather than a constructor
+    /// param, so `BLEManager` doesn't need to know about `SyncProgress` at init time). nil-safe: every call
+    /// site here is optional-chained, so a screen that never observes `AppModel.syncProgress` costs nothing.
+    var syncProgress: SyncProgress?
     /// #716: stored on bootstrap so the scan callback can fix the seeded "WHOOP" model label.
     private var registryStore: DeviceRegistryStore?
     /// #716: true once the seeded "WHOOP" model has been stamped to the correct family.
@@ -1890,6 +1895,14 @@ public final class BLEManager: NSObject, ObservableObject {
     /// the Backfiller; it is passed here only for logging.
     func ackHistoricalChunk(trim: UInt32, endData: [UInt8]) {
         send(.historicalDataResult, payload: [0x01] + endData, writeType: .withResponse)
+        // #1005-STORM: per-chunk progress-bar tick (offload phase). Hops to a Task for the same reason as
+        // `beginBackfill`'s anchor above (`latestHRSampleTs()` is async, this function isn't); `updateOffload`
+        // no-ops safely if `beginOffload` hasn't run yet or the bar isn't in the offload phase.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let frontier = await self.collector?.latestHRSampleTs()
+            self.syncProgress?.updateOffload(frontier: frontier)
+        }
         // Progress signal for the "Syncing strap history…" UI (#77). Same main-queue delegate path as
         // the other state mutations (e.g. lastSyncedAt in exitBackfilling). NOT historicalAckLogCounter
         // — that's a puffin-write log throttle that never increments on WHOOP 4.
@@ -1947,6 +1960,19 @@ public final class BLEManager: NSObject, ObservableObject {
         // the same burst banked rows — tell the backfiller so its no-cursor END reads as "caught up", not
         // "no banked history / charge to 100%". A fresh offload (count 0) keeps the honest guidance.
         backfiller.begin(family: selectedModel.deviceFamily, continuedAfterRows: consecutiveAutoContinues > 0)
+        // #1005-STORM: anchor the progress bar's offload phase ONLY on a fresh burst
+        // (consecutiveAutoContinues == 0), never on an auto-continue re-kick — re-anchoring on every
+        // continuation would snap the bar back toward 0 instead of sweeping across the whole burst. Hops
+        // to a Task because `latestHRSampleTs()` is async and this function isn't; `collector` is captured
+        // as `self.collector` inside the closure so a nil'd-out collector (e.g. a fast disconnect) reads
+        // safely rather than crashing on a stale local.
+        if consecutiveAutoContinues == 0 {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let frontier = await self.collector?.latestHRSampleTs()
+                self.syncProgress?.beginOffload(frontier: frontier)
+            }
+        }
         backfilling = true
         state.backfilling = true
         state.syncChunksThisSession = 0
@@ -2086,6 +2112,11 @@ public final class BLEManager: NSObject, ObservableObject {
         // success nor a failure: nothing was lost, and the next sync re-offloads what was left.
         // If a future edit starts classifying more reasons, this one must stay in the fall-through.
         exitBackfilling(reason: "aborted by user")
+        // #1005-STORM: an abort never stamps `lastSyncedAt` (see the comment just above — deliberately
+        // neither success nor failure), so `AppModel.refreshAfterCompletedBackfill` never fires and its
+        // `syncProgress.finish()` defer never runs. Without this, the bar would sit stuck at whatever
+        // fraction the offload phase reached when the user cancelled.
+        syncProgress?.finish()
     }
 
     private func exitBackfilling(reason: String) {
@@ -2310,7 +2341,8 @@ public final class BLEManager: NSObject, ObservableObject {
             // Snapshotting `> 0` = the auto-continue can't disagree with the empty verdict, and a dup-only
             // re-offload (0 new rows) stops instead of spinning on already-synced data.
             maybeAutoContinueBackfill(trimAdvanced: trimAdvanced,
-                                      persistedSensorRows: persistedSensorRows)
+                                      persistedSensorRows: persistedSensorRows,
+                                      sessionReason: reason)
         }
     }
 
@@ -2325,7 +2357,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// `trimAdvanced` is the spin-detector signal computed in exitBackfilling (did this session move the
     /// trim cursor vs the previous one) — passed in because exitBackfilling has already advanced
     /// `lastSessionEndTrim` past the comparison point by the time this Task runs.
-    private func maybeAutoContinueBackfill(trimAdvanced: Bool, persistedSensorRows: Bool) {
+    private func maybeAutoContinueBackfill(trimAdvanced: Bool, persistedSensorRows: Bool, sessionReason: String) {
         // Cheap pre-checks first (no Task if we already know we won't continue): still connected, under
         // the cap, and the trim moved. The frontier read only happens when those already hold.
         guard state.connected, state.bonded else { return }
@@ -2364,6 +2396,14 @@ public final class BLEManager: NSObject, ObservableObject {
                 if count < BackfillContinuation.defaultMaxAutoContinues {
                     consecutiveAutoContinues = 0
                 }
+                // #1005-STORM: a "timeout" session that stops here (no re-kick) never stamps
+                // `state.lastSyncedAt` (only `reason == "HISTORY_COMPLETE"` does, in `exitBackfilling`), so
+                // `AppModel.refreshAfterCompletedBackfill` never fires and its `syncProgress.finish()` defer
+                // never runs — without this the bar would sit stuck at whatever fraction the offload phase
+                // reached. A `HISTORY_COMPLETE` session reaching this same "no re-kick" branch is fine left
+                // alone: `lastSyncedAt` WAS stamped, so the normal flow will transition the bar into the
+                // analyze phase and clear it correctly on completion.
+                if sessionReason == "timeout" { self.syncProgress?.finish() }
                 return
             }
             // Guard against a race: a real backfill may already have re-started (periodic/connect) in the
@@ -4848,6 +4888,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         backfilling = false
         state.backfilling = false
         state.syncChunksThisSession = 0
+        // #1005-STORM: same reasoning as the "syncing pill" reset just above — a mid-offload disconnect
+        // bypasses both `exitBackfilling` and `abortBackfill`, so without this the progress bar would be
+        // left stuck at whatever fraction the offload phase reached when the link dropped.
+        syncProgress?.finish()
         // A mid-sync disconnect bypasses exitBackfilling, so clear the reject counters here too —
         // otherwise a stale non-zero count survives until the next beginBackfill. (#77/#91)
         state.rejectedFramesThisSession = 0

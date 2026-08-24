@@ -108,6 +108,7 @@ struct StrandiOSApp: App {
                 .environmentObject(model.behavior)
                 .environmentObject(model.intelligence)
                 .environmentObject(model.coach)
+                .environmentObject(model.syncProgress)   // #1005-STORM: the Today sync/analyze progress bar
                 .environmentObject(health)
                 .environmentObject(router)
                 .environmentObject(UpdateStore.shared)
