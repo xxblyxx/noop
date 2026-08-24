@@ -69,6 +69,9 @@ struct AutomationsView: View {
             healthInsightsCard
             batteryCard
             strainTargetCard
+            #if os(iOS)
+            syncCompleteCard
+            #endif
         }
     }
 
@@ -419,6 +422,26 @@ struct AutomationsView: View {
             }
         }
     }
+
+    // MARK: - Sync-complete notification (#1005-STORM, iOS only)
+
+    #if os(iOS)
+    /// Notify when a background sync/analyze pass finishes while the app was closed. iOS-only:
+    /// backgrounded processing is an iOS `BGProcessingTask` concept (see `StrandiOSApp.swift`); macOS has
+    /// no equivalent backgrounded-while-closed state to notify about.
+    private var syncCompleteCard: some View {
+        Section2(icon: "checkmark.circle", title: String(localized: "Sync complete"),
+                 blurb: String(localized: "Get a notification if a strap sync and score finishes while NOOP is in the background. Best-effort — iOS decides when background work actually runs, so this isn't guaranteed to fire every time."),
+                 active: behavior.syncCompleteNotify) {
+            ToggleRow(label: String(localized: "Notify when sync finishes in the background"),
+                      help: String(localized: "A one-time notification once last night's data is scored, if that happened while you weren't in the app."),
+                      isOn: $behavior.syncCompleteNotify)
+                .onChangeCompat(of: behavior.syncCompleteNotify) { on in
+                    if on { AnalyzeCompleteNotifier.requestAuthorization() }
+                }
+        }
+    }
+    #endif
 
     // MARK: - Strain target nudge (#593)
 

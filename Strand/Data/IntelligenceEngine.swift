@@ -2095,6 +2095,17 @@ final class IntelligenceEngine: ObservableObject {
         diagnosticSink?("re-score: done — scored \(scoredNights.count) night(s) in \(Int(Date().timeIntervalSince(reScoreStart) * 1000)) ms (#1005)", nil)
     }
 
+    /// Background-task entry point (#1005-STORM, `SyncAnalyzeBackgroundScheduler`): score already-banked
+    /// data via the SAME `force: false` fingerprint gate an idle foreground tick uses, and report whether
+    /// real scoring happened so the caller can skip its own follow-up refresh/publish/notify on the common
+    /// no-op wake (nothing streamed HR while the app was suspended, so the gate is trustworthy here — see
+    /// the fix commit's notes on why this differs from the live-session case the gate can't help with).
+    func analyzeIfStale() async -> Bool {
+        let before = UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey)
+        await analyzeRecent(force: false)
+        return UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey) != before
+    }
+
     /// UserDefaults key for the #836 idle-tick gate: the `(count:maxTs)` HR fingerprint the last completed
     /// `analyzeRecent` scored against. A non-forced tick whose current fingerprint equals this skips the
     /// 21-day rescore; cleared implicitly by any HR insert/delete (the fingerprint moves), so it self-heals.

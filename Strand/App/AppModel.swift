@@ -592,6 +592,33 @@ final class AppModel: ObservableObject {
     /// A closure rather than a direct reference because `HealthKitBridge` owns iOS-only HealthKit state
     /// while this type is shared with macOS, and the bridge is a `@StateObject` the app scene owns.
     var healthWriteBack: (() async -> Void)?
+
+    /// `SyncAnalyzeBackgroundScheduler`'s task body (#1005-STORM). Covers the gap
+    /// `refreshAfterCompletedBackfill` can't: the strap disconnects right after HISTORY_COMPLETE (taken off
+    /// to charge, walked out of range) before the 30s post-offload debounce fires or its analyze pass
+    /// finishes, and iOS suspends the process — `bluetooth-central` only keeps NOOP alive for an ACTIVE BLE
+    /// session, not after the link drops. The data is already banked in the store; this just gets it
+    /// scored. It cannot and does not try to wake BLE itself — that stays `bluetooth-central`'s job while
+    /// connected.
+    ///
+    /// ONLY ever called from `SyncAnalyzeBackgroundScheduler`'s registered operation, which iOS invokes
+    /// exclusively while backgrounded — so, unlike every other post-analyze site in this file, this one
+    /// does not need its own foreground/background check before notifying.
+    func runBackgroundAnalyze() async {
+        guard !live.backfilling, !live.analyzing else {
+            live.append(log: "background analyze: skipped, offload/analyze already in flight")
+            return
+        }
+        let scored = await intelligence.analyzeIfStale()
+        live.append(log: "background analyze: scored=\(scored)")
+        guard scored else { return }
+        await refreshV5Signals()
+        await WidgetSnapshot.publish(from: self)
+        await healthWriteBack?()
+        if behavior.syncCompleteNotify {
+            AnalyzeCompleteNotifier.post()
+        }
+    }
     #endif
 
     private func refreshAfterCompletedBackfill() async {

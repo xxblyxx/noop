@@ -57,6 +57,11 @@ final class BehaviorStore: ObservableObject {
     /// recovery-derived optimal band. Default OFF like every other automation.
     @Published var strainTargetNudge: Bool { didSet { d.set(strainTargetNudge, forKey: K.strainTargetNudge) } }
 
+    // MARK: Sync-complete notification (#1005-STORM)
+    /// Notify when a background sync/analyze pass finishes while the app was closed. Default OFF like
+    /// every other automation — this is a nicety, not a safety-relevant alert like battery/illness.
+    @Published var syncCompleteNotify: Bool { didSet { d.set(syncCompleteNotify, forKey: K.syncCompleteNotify) } }
+
     private let d = UserDefaults.standard
     private enum K {
         static let dtAction = "behavior.doubleTapAction"
@@ -80,6 +85,7 @@ final class BehaviorStore: ObservableObject {
         static let batteryAlerts = "behavior.batteryAlerts"
         static let batteryPredictiveAlerts = "behavior.batteryPredictiveAlerts"
         static let strainTargetNudge = "behavior.strainTargetNudge"
+        static let syncCompleteNotify = "behavior.syncCompleteNotify"
     }
 
     init() {
@@ -102,6 +108,7 @@ final class BehaviorStore: ObservableObject {
         batteryAlerts = d.object(forKey: K.batteryAlerts) as? Bool ?? true
         batteryPredictiveAlerts = d.object(forKey: K.batteryPredictiveAlerts) as? Bool ?? true
         strainTargetNudge = d.object(forKey: K.strainTargetNudge) as? Bool ?? false
+        syncCompleteNotify = d.object(forKey: K.syncCompleteNotify) as? Bool ?? false
     }
 
     // MARK: Charge baseline recalibration

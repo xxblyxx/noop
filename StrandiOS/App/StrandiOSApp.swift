@@ -95,6 +95,12 @@ struct StrandiOSApp: App {
         model.healthWriteBack = { [weak bridge] in
             _ = await bridge?.writeBackAfterNewData()
         }
+        // #1005-STORM: register the deferred-analyze BGProcessingTask handler BEFORE launch finishes —
+        // same registration requirement as ScheduledDebugExport above. `schedule()` is called from the
+        // `.background` scenePhase transition, not here; this call only teaches iOS the identifier exists.
+        SyncAnalyzeBackgroundScheduler.register { [weak model] in
+            await model?.runBackgroundAnalyze()
+        }
     }
 
     var body: some Scene {
@@ -260,6 +266,10 @@ struct StrandiOSApp: App {
                 // Re-submit on every transition because iOS may discard an old best-effort request.
                 HealthWritebackBackgroundScheduler.updateSchedule(
                     isAuthorized: health.auth == .authorized)
+                // #1005-STORM: one request per backgrounding, not a standing cadence — see
+                // SyncAnalyzeBackgroundScheduler's doc for why this deliberately isn't a self-re-arming
+                // scheduler like the health write-back one above.
+                SyncAnalyzeBackgroundScheduler.schedule()
                 // #114: capture the LAST in-app live state on the way out so the Home widget matches what
                 // the user just saw — its battery/HR/score otherwise lag to the last FOREGROUND refreshSeq
                 // bump. One reload per app-exit is low-frequency and well within WidgetKit's daily budget.
