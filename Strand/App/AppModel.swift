@@ -59,6 +59,16 @@ final class AppModel: ObservableObject {
     /// `LiveState` (see `SyncProgress.swift`'s doc). `BLEManager` drives the offload phase; this class
     /// drives the analyze phase in `refreshAfterCompletedBackfill`.
     let syncProgress = SyncProgress()
+    /// #1005-STORM (review finding #2): `refreshAfterCompletedBackfill`'s reentrancy guard. The debounce
+    /// sink that calls it launches an unstructured `Task` per `lastSyncedAt` emission with no dedup — two
+    /// firings 30s+ apart can overlap if a pass runs long, and the SECOND invocation's `defer { live.
+    /// analyzing = false }` was clearing the FIRST invocation's still-genuine claim early, hiding the bar
+    /// mid-analyze. Mirrors the `#899-A` re-arm shape already used in `IntelligenceEngine.analyzeRecent`
+    /// (`pendingForcedRescore`): a re-entrant call sets `pendingPostOffloadRefresh` and returns immediately
+    /// without touching `live.analyzing`/the bar at all; the in-flight call's own `defer` re-invokes once
+    /// after it fully finishes.
+    private var refreshInFlight = false
+    private var pendingPostOffloadRefresh = false
 
     /// Opt-in AI coach (bring-your-own-key) , the one networked feature, off until the user enables it.
     let coach: AICoachEngine
@@ -632,6 +642,23 @@ final class AppModel: ObservableObject {
     #endif
 
     private func refreshAfterCompletedBackfill() async {
+        // #1005-STORM (review finding #2): a second debounce firing while a prior pass is still running
+        // must not touch `live.analyzing`/the bar at all — see `pendingPostOffloadRefresh`'s doc. Re-arm
+        // and return rather than drop, so the freshly-synced data this call was about to refresh for
+        // still gets refreshed once the in-flight one finishes.
+        guard !refreshInFlight else {
+            pendingPostOffloadRefresh = true
+            live.append(log: "Backfill: refresh already in flight — re-arming for after it finishes")
+            return
+        }
+        refreshInFlight = true
+        defer {
+            refreshInFlight = false
+            if pendingPostOffloadRefresh {
+                pendingPostOffloadRefresh = false
+                Task { [weak self] in await self?.refreshAfterCompletedBackfill() }
+            }
+        }
         // #1005-STORM: never analyze while ANOTHER offload session is already in flight. The 30s debounce
         // above coalesces a single burst, but the periodic timer / auto-continue can start a fresh session
         // right as this fires — measured on-device, a pass overlapping two such sessions (9 rows total)
@@ -647,6 +674,19 @@ final class AppModel: ObservableObject {
         while live.backfilling && !Task.isCancelled && backfillWaited < 120 {
             try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 s, re-check; ~2 min cap then proceed
             backfillWaited += 1
+        }
+        // #1005-STORM (review finding #7): if the cap was hit and a backfill is STILL genuinely running,
+        // bail out cleanly instead of proceeding — do NOT claim `live.analyzing` or call `beginAnalyze()`.
+        // The old code proceeded unconditionally: it flipped the bar out of `.offload` phase (so further
+        // real offload chunk ticks silently no-op against phase `.analyze`) and then hid it entirely on
+        // return, misrepresenting a still-in-progress sync as complete. Left alone here, BLEManager's own
+        // offload-side finish/timeout paths keep owning the bar's teardown, and the backfill that's still
+        // running will itself eventually stamp a fresh `lastSyncedAt` (or disconnect), driving a correctly
+        // gated future call through the normal debounce path — no immediate re-arm needed or wanted here,
+        // since the flag being genuinely stuck would just make an immediate retry re-poll the same 120s.
+        guard !live.backfilling else {
+            live.append(log: "Backfill: refresh gave up waiting after 120s, backfill still running — leaving the bar to BLE's own teardown")
+            return
         }
         // #1005-STORM: claim `live.analyzing` MANUALLY here, spanning `repo.refresh` + `analyzeRecent`,
         // rather than relying solely on the `$computing` mirror wired in init(). `computing` is set
