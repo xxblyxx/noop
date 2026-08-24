@@ -603,6 +603,23 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 s, re-check; ~2 min cap then proceed
             backfillWaited += 1
         }
+        // #1005-STORM: claim `live.analyzing` MANUALLY here, spanning `repo.refresh` + `analyzeRecent`,
+        // rather than relying solely on the `$computing` mirror wired in init(). `computing` is set
+        // INSIDE `analyzeRecent`, after its own guard checks — but `repo.refresh(days: 120)` right below
+        // is itself a real await (~50 store reads per its own comment) that runs BEFORE `analyzeRecent` is
+        // even called. Without this manual claim, `live.backfilling` is already false (the poll above just
+        // exited) and `live.analyzing` is still false (nothing has set it yet) for that whole span —
+        // exactly the window `BLEManager.requestSync`'s `.periodic`/`.strap` deferral checks, so a trigger
+        // landing right here would slip through and reproduce the measured overlap from a different angle.
+        // `defer` releases it when this function returns — covering `repo.refresh` + `analyzeRecent`, which
+        // is the actual store-contending work; the mirror sink may independently flip it false the instant
+        // `analyzeRecent`'s own `computing` clears (before `refreshV5Signals`/widget-publish/watch-push run
+        // below), which is fine — none of that tail work reads the same raw streams a fresh backfill writes
+        // to, so re-opening the window a little early there doesn't reintroduce the contention this exists
+        // to prevent. The mirror still stands for OTHER `analyzeRecent` callers (the 30-min backstop,
+        // one-shot heals) that don't go through this manual claim.
+        live.analyzing = true
+        defer { live.analyzing = false }
         live.append(log: "Backfill: refreshing dashboard cache from completed sync")
         await repo.refresh(days: 120)
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute

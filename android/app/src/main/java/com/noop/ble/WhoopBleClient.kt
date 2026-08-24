@@ -2286,6 +2286,15 @@ class WhoopBleClient(
         ioScope.launch {
             try {
                 delay(POST_BACKFILL_ANALYZE_DELAY_MS) // let trailing chunks of the same session land
+                // #1005-STORM: unlike Swift (`AppModel.refreshAfterCompletedBackfill`, which needed a manual
+                // `live.analyzing` claim because its `repo.refresh(days: 120)` runs BEFORE `analyzeRecent`
+                // sets `computing`), this coroutine has only ONE suspension point before the engine's own
+                // `analyzeGate.withLock` — `repository.hrFingerprint()` a few lines below. ProfileStore reads
+                // here are synchronous SharedPreferences, not a suspend point, so nothing can interleave
+                // during them. The `hrFingerprint()` gap is real but small (one indexed COUNT/MAX query);
+                // left as-is rather than adding an unverifiable manual claim to a module that can't be
+                // compiled in this environment (see CLAUDE.md) — analyzeGate itself is still the thing that
+                // prevents two overlapping SCORING passes either way.
                 val profileStore = ProfileStore.from(context)
                 val profile = UserProfile(
                     weightKg = profileStore.weightKg,
