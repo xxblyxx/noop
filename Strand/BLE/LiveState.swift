@@ -547,7 +547,14 @@ public final class LiveState: ObservableObject {
         ouraWearState = nil               // a stale worn/charging badge must not outlive the link either
         // Perf: flush the durable log tail on disconnect (mirroring is batched in `append`), so a completed
         // session's tail is always persisted for a later scheduled export despite the per-line throttle.
-        Self.persistTail(log)
+        // `wait: true`, deliberately — unlike the periodic mid-session mirror (no deadline), this flush has
+        // one: the process may be about to terminate (jetsam, user force-quit right after a disconnect).
+        // A dropped/pending write here could lose the very tail `rollLogGenerationsIfNeeded` exists to
+        // rescue — see that function's doc comment for the three-consecutive-lost-captures history this
+        // mechanism was built to fix. `persistQueue` is still off the main actor and still ordered after
+        // any periodic mirror already queued (see `enqueuePersistTail`'s doc), it just doesn't return here
+        // until the write is actually durable.
+        enqueuePersistTail(wait: true)
         logsSincePersist = 0
     }
 
@@ -586,10 +593,12 @@ public final class LiveState: ObservableObject {
         if log.count > Self.maxLogLines + Self.trimSlack { log.removeFirst(log.count - Self.maxLogLines) }
         // Batched durable-tail mirror: persist every `persistEveryNLines` lines, not on every line;
         // `clearBiometrics()` flushes on disconnect so a completed session is always fully mirrored.
+        // #1005-STORM: hop the UserDefaults array write off the main actor via `persistQueue` — see
+        // `enqueuePersistTail` and the serial-queue ordering note on `persistQueue`.
         logsSincePersist += 1
         if logsSincePersist >= Self.persistEveryNLines {
             logsSincePersist = 0
-            Self.persistTail(log)
+            enqueuePersistTail()
         }
         // #990: fold the Backfiller's per-session "session persisted N rows" summary into the persisted
         // ALL-TIME drained-rows tally, right here at the single log sink (no new BLE seam). The summary
@@ -622,12 +631,38 @@ public final class LiveState: ObservableObject {
     /// smaller than the live `maxLogLines` ring so the persisted copy stays modest.
     static let tailLimit = 2_000
 
-    /// Mirror the most recent `tailLimit` lines to UserDefaults (called from `append`). Synchronous and
-    /// cheap (a single small array write); UserDefaults coalesces the disk flush. `nonisolated` (touches
-    /// only UserDefaults, no actor state) so the background/static export path can read the twin getter.
+    /// #1005-STORM: a SERIAL background queue for the UserDefaults tail write, not a bare `Task.detached`
+    /// per call. `append`'s periodic mirror and `clearBiometrics`'s disconnect flush both enqueue onto this
+    /// one queue; serial dispatch preserves submission order, so the disconnect flush (submitted after any
+    /// periodic mirror already in flight) can never be overwritten by a late-finishing earlier write racing
+    /// it off the main actor. A pool of unordered detached tasks could NOT make that guarantee.
+    private static let persistQueue = DispatchQueue(label: "noop.livestate.persistTail", qos: .utility)
+
+    /// Mirror the most recent `tailLimit` lines to UserDefaults. `nonisolated` (touches only UserDefaults,
+    /// no actor state) so the background/static export path can read the twin getter, AND so `append`/
+    /// `clearBiometrics` can enqueue this onto `persistQueue` off the main actor — a 2,000-entry array
+    /// write to UserDefaults is small in isolation but ran ON the main thread on every 32nd log line, and a
+    /// busy Live Activity session (~1 Hz) hits that every ~32s.
     nonisolated private static func persistTail(_ lines: [String]) {
         let tail = lines.count > tailLimit ? Array(lines.suffix(tailLimit)) : lines
         UserDefaults.standard.set(tail, forKey: tailKey)
+    }
+
+    /// Snapshot `log` (a value copy, safe to hand off) and enqueue the UserDefaults write on
+    /// `persistQueue`, off the main actor. Callers on the main actor only.
+    ///
+    /// `wait`: false for the periodic mid-session mirror (`append`) — no deadline, so don't block the
+    /// caller. TRUE for the disconnect flush (`clearBiometrics`) — the process may be about to terminate,
+    /// so this must complete before returning (see that call site's comment), AND `persistQueue` being
+    /// serial means the `.sync` submission still drains strictly after any earlier `.async` mirror already
+    /// queued, so the disconnect flush can never be overwritten by a late-finishing periodic one.
+    private func enqueuePersistTail(wait: Bool = false) {
+        let snapshot = log
+        if wait {
+            Self.persistQueue.sync { Self.persistTail(snapshot) }
+        } else {
+            Self.persistQueue.async { Self.persistTail(snapshot) }
+        }
     }
 
     /// The persisted log tail, newest-last — what a scheduled export reads when no live session is open.
