@@ -26,6 +26,16 @@ final class IntelligenceEngine: ObservableObject {
     @Published var results: [Computed] = []      // newest first
     @Published var computing = false
     @Published var note: String?
+    /// #1005-STORM (review finding #6): monotonic count of `analyzeRecent` passes that ran to completion
+    /// (survived every early guard-return AND weren't cancelled — see the increment site at the end of
+    /// `analyzeRecent`). `analyzeIfStale()` diffs this, not the watermark string, to tell "a pass really
+    /// ran" apart from "nothing changed" — the watermark write is gated on `!wmKey.isEmpty`, which is also
+    /// true whenever `store.hrFingerprint()` transiently throws (`wmKey` becomes `""` via `try?`), so a
+    /// completed pass following a fingerprint-read hiccup used to advance neither the watermark string nor
+    /// (therefore) `analyzeIfStale`'s old before/after diff, silently reporting `scored=false` for a night
+    /// that really was scored. This counter is independent of `wmKey` entirely, so that failure mode can't
+    /// reach it.
+    private(set) var completedPassCount = 0
 
     /// #899-A re-arm: a `force: true` recompute (a post-backfill rescore AppModel kicks off after a sync)
     /// that arrives while an idle-tick pass already holds the `computing` lock would otherwise be SILENTLY
@@ -2130,6 +2140,10 @@ final class IntelligenceEngine: ObservableObject {
         // scan. Guarding on `!Task.isCancelled` is what actually makes the comment above true now.
         if !wmKey.isEmpty, !Task.isCancelled { UserDefaults.standard.set(wmKey, forKey: Self.analyzeWatermarkKey) }
         diagnosticSink?("re-score: done — scored \(scoredNights.count) night(s) in \(Int(Date().timeIntervalSince(reScoreStart) * 1000)) ms (#1005)", nil)
+        // #1005-STORM (review finding #6): count this pass as completed regardless of `wmKey` — see
+        // `completedPassCount`'s doc for why the watermark string can't be trusted for this on its own.
+        // After the cancellation check above, so a cancelled pass doesn't count as completed.
+        if !Task.isCancelled { completedPassCount += 1 }
     }
 
     /// Background-task entry point (#1005-STORM, `SyncAnalyzeBackgroundScheduler`): score already-banked
@@ -2137,10 +2151,15 @@ final class IntelligenceEngine: ObservableObject {
     /// real scoring happened so the caller can skip its own follow-up refresh/publish/notify on the common
     /// no-op wake (nothing streamed HR while the app was suspended, so the gate is trustworthy here — see
     /// the fix commit's notes on why this differs from the live-session case the gate can't help with).
+    ///
+    /// #1005-STORM (review finding #6): diffs `completedPassCount`, NOT the watermark string — a diff on
+    /// the watermark under-reported whenever `store.hrFingerprint()` transiently threw (empty `wmKey`
+    /// disables the watermark write too), so a pass that genuinely ran could still report `scored: false`.
+    /// See `completedPassCount`'s doc for the full failure mode this replaces.
     func analyzeIfStale() async -> Bool {
-        let before = UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey)
+        let before = completedPassCount
         await analyzeRecent(force: false)
-        return UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey) != before
+        return completedPassCount != before
     }
 
     /// UserDefaults key for the #836 idle-tick gate: the `(count:maxTs)` HR fingerprint the last completed
