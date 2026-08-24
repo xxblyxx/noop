@@ -151,18 +151,42 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 
 ### The sync-rescore-storm fix reduces re-score CPU and Commit 5's BGProcessingTask actually fires
 - id: sync-rescore-storm-fix
-- shipped: `fix/sync-rescore-storm` branch, commits `59771a02`..`3f434482` (#1005-STORM), 2026-08-23
-  — pending merge to `main`
-- claim: the five commits together turn the measured re-score storm (10 passes / 21.5 min of
+- shipped: `fix/sync-rescore-storm` branch, commits `59771a02`..`08a7824f` (#1005-STORM), 2026-08-23
+  — pending merge to `main`. **Update 2026-08-24**: `/code-review med` against the branch's diff
+  returned 8 confirmed findings, several of them in the exact mechanisms this entry's claim depends
+  on — fixed in 6 follow-up commits on the same branch (not yet hashed at the time of this edit; see
+  `docs/superpowers/plans/2026-08-23-sync-rescore-storm.md`'s "Corrections made during implementation"
+  for the list). Two of the eight meant the progress bar itself could not be trusted on any prior
+  device observation:
+  - the offload fraction formula divided by the wrong denominator and pinned near
+    `offloadWeight` (70%) within seconds of every burst starting, instead of sweeping — so any earlier
+    on-device look at "does the bar move smoothly" was watching a bug, not the real behavior;
+  - a fast disconnect could re-arm the bar's `.offload` phase on an already-dead session (a queued
+    anchor `Task` landing after the disconnect's synchronous `finish()`), and a stale
+    `consecutiveAutoContinues` could silently disable the bar's anchor for the next backfill on the
+    same connection — so the bar may not have appeared at all on some prior syncs, for reasons
+    unrelated to CPU/overlap.
+  Also fixed: a reentrancy gap in `refreshAfterCompletedBackfill` that could hide the bar mid-analyze,
+  the 120s backfill-wait cap proceeding and hiding the bar even when a backfill was still genuinely
+  running, `analyzeRecent`'s background pass having no real cancellation checks (so a
+  `BGProcessingTask` expiration didn't actually stop the work), and `analyzeIfStale()` under-reporting
+  `scored=false` after a transient `hrFingerprint()` read failure even when a full pass had run.
+- claim: the eleven commits together turn the measured re-score storm (10 passes / 21.5 min of
   re-score CPU in a 47-minute window, one 573s pass from a 12x overlap inflation) into ≤2 passes /
   <2 min with no overlapping pass, AND Commit 5's `SyncAnalyzeBackgroundScheduler` fires and scores
   a deferred night when the strap disconnects right after HISTORY_COMPLETE before the foreground
-  analyze pass (`refreshAfterCompletedBackfill`) gets to run.
+  analyze pass (`refreshAfterCompletedBackfill`) gets to run — AND (added 2026-08-24) the progress bar
+  itself sweeps smoothly across the offload phase (not pinned near 70% within seconds), never gets
+  stuck or silently re-armed across a disconnect/auto-continue boundary, and never hides itself while
+  a backfill is still genuinely in flight.
 - needs: a real morning sync against a repopulated store from a live overnight WHOOP offload.
   Confirming Commit 5 specifically needs the narrower case: the strap coming off / going out of
   range right after HISTORY_COMPLETE while NOOP is backgrounded, before its 30s post-offload
-  debounce fires.
-- blocked-because: implemented same-day, 2026-08-23; no morning sync has occurred yet on this build.
+  debounce fires. Confirming the progress-bar fixes needs eyes-on during a real sync: watch the bar
+  sweep (not jump), watch it survive a strap disconnect/reconnect mid-sync without getting stuck or
+  vanishing, and confirm it clears once the analyze pass actually finishes.
+- blocked-because: implemented 2026-08-23, review + fixes landed 2026-08-24; no morning sync has
+  occurred yet on the fixed build.
 - check:
   ```
   xcrun devicectl device copy from --device 819D37A3-B45A-56CF-9FEC-40D460EC74F8 \
@@ -172,7 +196,8 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   then in `strapLog.tail`: count `re-score: done` lines and sum their durations per sync window, and
   separately grep for `background analyze:` (Commit 5's own log tag, added specifically so this
   check can tell "never fired" apart from "fired and no-opped") to see whether/how often the
-  BGProcessingTask ran.
+  BGProcessingTask ran. For the progress bar: eyes-on during a live sync (no store pull can tell you
+  whether the bar visually swept or jumped — this half of the check is observational, not a log grep).
 - passes-if: | metric | baseline (2026-08-23) | target |
   |---|---|---|
   | re-score passes per ~47 min | 10 | ≤ 2 |
@@ -190,7 +215,12 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   the night — so the deferred wake finds nothing new and correctly no-ops. Treat a quiet log as
   untested, not broken; only a `BGProcessingTask submit failed` line, or a `scored=true` line that
   should have been `false` (or vice versa), is evidence of an actual defect.
-- check-after: 2026-08-24
+
+  For the progress bar (added 2026-08-24): the bar sweeps visibly during the offload phase rather
+  than jumping straight to ~70%; it never sits stuck at a stale fraction after a disconnect/reconnect
+  mid-sync; it never vanishes while a backfill is still genuinely running. Any of those failing is
+  evidence the epoch guard, entry gating, or reentrancy fix has its own bug.
+- check-after: 2026-08-25
 
 ## Settled
 

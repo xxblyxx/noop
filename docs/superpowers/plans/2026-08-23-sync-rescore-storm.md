@@ -279,6 +279,67 @@ review — recorded honestly rather than silently amended:
      into the physical `StrandiOS/Resources/Info.plist` (the file `INFOPLIST_FILE` actually points at,
      `GENERATE_INFOPLIST_FILE: NO`) rather than the properties being shadowed by a stale checked-in
      file — verified the plist byte-for-byte after regenerating.
+7. **`/code-review med` against the full branch diff (2026-08-24) returned 8 confirmed findings**, fixed
+   in 6 follow-up commits on this same branch. Two of the eight meant the progress bar (Commit 4) could
+   not be trusted on any prior device observation — see `docs/PENDING_VALIDATION.md`'s
+   `sync-rescore-storm-fix` entry, updated the same day, for the full claim/check text. Summary:
+   - **`SyncProgress.updateOffload` divided by the wrong denominator** — wall-clock elapsed since
+     `beginOffload` instead of `now − frontierAtBurstStart` (both epoch timestamps, per the type's own
+     doc comment) — so the fraction clamped to `offloadWeight` (0.7) within seconds of every burst
+     starting regardless of backlog size, instead of sweeping. Fixed to recompute the denominator live
+     each call, per the doc's original formula; also added an entry gate (nil frontier or a sub-120s
+     initial gap stays `.idle`) and a monotonic clamp (the per-chunk update Tasks are unordered, so a
+     late-resuming stale-frontier update must never lower a fraction already rendered). Pinned with a new
+     `StrandTests/SyncProgressTests.swift`, the only mechanically-verifiable fix in this batch — required
+     adding an injectable clock (`SyncProgress.now: () -> Date`) since the type read `Date()` directly.
+   - **A queued `beginOffload`/`updateOffload` Task could land after a disconnect's synchronous
+     `finish()`**, re-arming `.offload` phase on an already-dead session with nothing left to ever clear
+     it. Fixed with a `BLEManager.offloadEpoch` counter, bumped at every fresh anchor and at all three
+     `finish()` sites, captured before each async hop and re-checked on resume.
+   - **A stale `consecutiveAutoContinues` could silently disable the bar's anchor** for the next backfill
+     on the same connection (the counter's reset-on-cap-hit is deliberately skipped by the pre-existing
+     #364 logic). Fixed by checking `syncProgress?.phase != .offload` directly instead of
+     `consecutiveAutoContinues == 0` — the actual intent ("don't re-anchor mid-sweep"), self-healing
+     regardless of why the counter didn't reset.
+   - **`refreshAfterCompletedBackfill` had no reentrancy guard** — two overlapping invocations (the
+     debounce sink launches an unstructured `Task` per emission with no dedup) could interleave, with the
+     second's `defer { live.analyzing = false }` clearing the first's still-genuine claim early. Fixed
+     with a `refreshInFlight`/`pendingPostOffloadRefresh` pair, mirroring the `#899-A` re-arm shape
+     already used in `IntelligenceEngine.analyzeRecent`.
+   - **The 120s `backfillWaited` poll cap proceeded unconditionally**, diverging from this plan's own
+     stated "hard gate: re-arm and return" design (line 76-78 above) — what shipped instead called
+     `beginAnalyze()` and hid the bar even while a backfill was still genuinely running. Fixed: if the cap
+     is hit with `live.backfilling` still true, bail out without claiming the bar, leaving its teardown to
+     BLE's own finish/timeout paths.
+   - **`analyzeRecent`'s background pass had zero cancellation checks** anywhere in the file, so
+     `SyncAnalyzeBackgroundScheduler`'s `expirationHandler` reported the task done to iOS while the actual
+     store reads/writes kept running unsupervised. Fixed by binding the dominant per-day detached scan
+     Task to a local, wrapping it in `withTaskCancellationHandler`, adding a per-day `Task.isCancelled`
+     check that `break`s (not `throw`s, keeping partial results), and guarding both the watermark write
+     and the `pendingForcedRescore` re-arm on `!Task.isCancelled`. Deliberately did NOT add cancellation
+     checks to every per-day computation or the smaller steps-calibration detached task — the day-loop
+     granularity is what actually stops the measured 48s-dominant cost in reasonable time.
+   - **`analyzeIfStale()` under-reported `scored=false`** whenever `store.hrFingerprint()` transiently
+     threw (the resulting empty `wmKey` disables the watermark write too, even though a full pass ran).
+     Fixed with a `completedPassCount` monotonic counter, independent of `wmKey` entirely, incremented
+     once at the true end of a non-cancelled `analyzeRecent` pass; `analyzeIfStale` diffs the counter
+     instead of the watermark string.
+   - **`LiveState`'s disconnect-flush comment overclaimed durability** — `.sync` genuinely guarantees the
+     `UserDefaults.set` call is issued before returning and drains after any earlier queued `.async`
+     mirror (both real, both kept), but NOT that the write reached disk (UserDefaults only queues the
+     value; the OS decides when the plist flushes). Comment corrected to claim only what `.sync` actually
+     delivers; also trimmed the main-actor copy from `log` (up to `maxLogLines`, 5,000 entries) to
+     `log.suffix(tailLimit)` (2,000) before the off-actor hop, since `persistTail` was truncating to the
+     same limit a moment later anyway.
+   - **Deliberately left unfixed, noted here instead**: a pre-existing race in
+     `maybeAutoContinueBackfill` where `consecutiveAutoContinues` is snapshotted outside its async `Task`
+     but the cap check and both writes happen inside it against the live field, so a disconnect landing in
+     between can act on a stale snapshot. Predates this branch; not one of the review's 8 findings; real
+     surgery, left for a future session — same treatment this section's correction #3 already gave the
+     `analyzeRecent` check-and-set race.
+   - **No Kotlin twin for any of these 8** — all scheduling, cancellation, iOS BGTask plumbing, or SwiftUI
+     presentation, none of `docs/CROSS_PLATFORM.md`'s binding categories. Same reasoning as correction #5
+     above.
 
 ## Also found, deliberately NOT in scope
 
