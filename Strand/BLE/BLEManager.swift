@@ -726,6 +726,16 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (its else path, under the cap) and on disconnect — NOT unconditionally on every HISTORY_COMPLETE,
     /// so a strap that slices one offload into many completions can't reset the cap each slice (#25).
     private var consecutiveAutoContinues = 0
+    /// #1005-STORM (review finding #3): bumped synchronously (main-actor, no `await`) by every path that
+    /// can end an offload session — `beginBackfill` (a fresh anchor starts a new epoch) and all three
+    /// `syncProgress?.finish()` sites. The async `Task`s that hop to read `latestHRSampleTs()` before
+    /// touching `syncProgress` (the anchor in `beginBackfill`, the per-chunk tick in `ackHistoricalChunk`)
+    /// capture the epoch synchronously before the hop and re-check it on resume — if a `finish()` ran on
+    /// ANY path in between, the epoch moved and the stale call becomes a no-op instead of re-arming
+    /// `.offload` phase on an already-dead session (a fast disconnect right after `beginBackfill` queued
+    /// its anchor Task was the reproducer: the synchronous `didDisconnectPeripheral` finish() ran first,
+    /// then the queued Task resumed and re-armed the bar with nothing left to ever clear it again).
+    private var offloadEpoch = 0
     /// #battery: consecutive offload sessions that banked ZERO sensor rows — a clean HISTORY_COMPLETE-empty
     /// OR an idle-timeout STALL. Feeds BackfillPolicy's exponential backoff so the 15-min periodic poll
     /// stops spinning the radio on a strap returning nothing (a capture showed ~6 empty stalls/hour with no
@@ -1897,10 +1907,14 @@ public final class BLEManager: NSObject, ObservableObject {
         send(.historicalDataResult, payload: [0x01] + endData, writeType: .withResponse)
         // #1005-STORM: per-chunk progress-bar tick (offload phase). Hops to a Task for the same reason as
         // `beginBackfill`'s anchor above (`latestHRSampleTs()` is async, this function isn't); `updateOffload`
-        // no-ops safely if `beginOffload` hasn't run yet or the bar isn't in the offload phase.
+        // no-ops safely if `beginOffload` hasn't run yet or the bar isn't in the offload phase. Epoch
+        // captured/re-checked the same way as the anchor Task (review finding #3) — a `finish()` landing
+        // between dispatch and resume must drop this stale tick rather than reviving a dead session's bar.
+        let epochAtDispatch = offloadEpoch
         Task { @MainActor [weak self] in
             guard let self else { return }
             let frontier = await self.collector?.latestHRSampleTs()
+            guard self.offloadEpoch == epochAtDispatch else { return }
             self.syncProgress?.updateOffload(frontier: frontier)
         }
         // Progress signal for the "Syncing strap history…" UI (#77). Same main-queue delegate path as
@@ -1960,16 +1974,29 @@ public final class BLEManager: NSObject, ObservableObject {
         // the same burst banked rows — tell the backfiller so its no-cursor END reads as "caught up", not
         // "no banked history / charge to 100%". A fresh offload (count 0) keeps the honest guidance.
         backfiller.begin(family: selectedModel.deviceFamily, continuedAfterRows: consecutiveAutoContinues > 0)
-        // #1005-STORM: anchor the progress bar's offload phase ONLY on a fresh burst
-        // (consecutiveAutoContinues == 0), never on an auto-continue re-kick — re-anchoring on every
-        // continuation would snap the bar back toward 0 instead of sweeping across the whole burst. Hops
-        // to a Task because `latestHRSampleTs()` is async and this function isn't; `collector` is captured
-        // as `self.collector` inside the closure so a nil'd-out collector (e.g. a fast disconnect) reads
-        // safely rather than crashing on a stale local.
-        if consecutiveAutoContinues == 0 {
+        // #1005-STORM (review finding #4): anchor the progress bar's offload phase ONLY on a fresh burst,
+        // never on an auto-continue re-kick — re-anchoring on every continuation would snap the bar back
+        // toward 0 instead of sweeping across the whole burst. Checking `syncProgress?.phase != .offload`
+        // directly, rather than `consecutiveAutoContinues == 0`: the counter can stay nonzero across
+        // sessions when the auto-continue cap is hit without a disconnect (the reset a few lines above
+        // this function, at the cap check, is deliberately skipped in that case, per the #364 comment on
+        // that guard) — which silently disabled the bar's anchor for the NEXT backfill on the same
+        // connection. `phase != .offload` expresses the actual intent ("don't re-anchor mid-sweep") and
+        // self-heals regardless of why the counter didn't reset.
+        //
+        // Hops to a Task because `latestHRSampleTs()` is async and this function isn't; `collector` is
+        // captured as `self.collector` inside the closure so a nil'd-out collector (e.g. a fast disconnect)
+        // reads safely rather than crashing on a stale local. #1005-STORM (review finding #3): the epoch is
+        // captured synchronously BEFORE the hop and re-checked on resume — a `syncProgress?.finish()` on
+        // any path (abort/timeout/disconnect) between dispatch and resume bumps `offloadEpoch`, so a stale
+        // anchor lands as a no-op instead of re-arming `.offload` phase on an already-dead session.
+        if syncProgress?.phase != .offload {
+            offloadEpoch += 1
+            let epochAtDispatch = offloadEpoch
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let frontier = await self.collector?.latestHRSampleTs()
+                guard self.offloadEpoch == epochAtDispatch else { return }
                 self.syncProgress?.beginOffload(frontier: frontier)
             }
         }
@@ -2116,6 +2143,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // neither success nor failure), so `AppModel.refreshAfterCompletedBackfill` never fires and its
         // `syncProgress.finish()` defer never runs. Without this, the bar would sit stuck at whatever
         // fraction the offload phase reached when the user cancelled.
+        offloadEpoch += 1   // review finding #3: invalidate any anchor/tick Task still in flight
         syncProgress?.finish()
     }
 
@@ -2403,7 +2431,10 @@ public final class BLEManager: NSObject, ObservableObject {
                 // reached. A `HISTORY_COMPLETE` session reaching this same "no re-kick" branch is fine left
                 // alone: `lastSyncedAt` WAS stamped, so the normal flow will transition the bar into the
                 // analyze phase and clear it correctly on completion.
-                if sessionReason == "timeout" { self.syncProgress?.finish() }
+                if sessionReason == "timeout" {
+                    self.offloadEpoch += 1   // review finding #3: invalidate any anchor/tick Task still in flight
+                    self.syncProgress?.finish()
+                }
                 return
             }
             // Guard against a race: a real backfill may already have re-started (periodic/connect) in the
@@ -4891,6 +4922,8 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // #1005-STORM: same reasoning as the "syncing pill" reset just above — a mid-offload disconnect
         // bypasses both `exitBackfilling` and `abortBackfill`, so without this the progress bar would be
         // left stuck at whatever fraction the offload phase reached when the link dropped.
+        offloadEpoch += 1   // review finding #3: invalidate any anchor/tick Task still in flight (this is
+                             // the disconnect race that was the actual reproducer for that finding)
         syncProgress?.finish()
         // A mid-sync disconnect bypasses exitBackfilling, so clear the reject counters here too —
         // otherwise a stale non-zero count survives until the next beginBackfill. (#77/#91)
