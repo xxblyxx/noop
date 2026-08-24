@@ -48,13 +48,18 @@ struct SyncProgressBar: View {
 
 #if DEBUG
 #Preview("SyncProgressBar") {
+    // Realistic epoch values, not `frontier: 0` — a near-zero frontier previously made both preview
+    // states render identically at `offloadWeight` (0.7) and silently hid the #1005-STORM fraction bug.
+    // `beginOffload`'s gap is `now - frontier`, so these need to be genuinely behind `Date()`.
+    let nowEpoch = Int(Date().timeIntervalSince1970)
+
     let offload = SyncProgress()
-    offload.beginOffload(frontier: 0)
-    offload.updateOffload(frontier: 30)   // fabricated fractions for the preview only, not live data
+    offload.beginOffload(frontier: nowEpoch - 1800)     // 30 min behind at burst start
+    offload.updateOffload(frontier: nowEpoch - 900)     // frontier has closed half the gap since
 
     let analyze = SyncProgress()
-    analyze.beginOffload(frontier: 0)
-    analyze.updateOffload(frontier: 100)
+    analyze.beginOffload(frontier: nowEpoch - 1800)
+    analyze.updateOffload(frontier: nowEpoch)           // fully caught up -> offloadWeight
     analyze.beginAnalyze()
     analyze.tickAnalyzeEstimate()
 
