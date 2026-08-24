@@ -268,8 +268,12 @@ struct StrandiOSApp: App {
                     isAuthorized: health.auth == .authorized)
                 // #1005-STORM: one request per backgrounding, not a standing cadence — see
                 // SyncAnalyzeBackgroundScheduler's doc for why this deliberately isn't a self-re-arming
-                // scheduler like the health write-back one above.
-                SyncAnalyzeBackgroundScheduler.schedule()
+                // scheduler like the health write-back one above. Log a submit failure here (distinct
+                // from "the task never ran" — model.runBackgroundAnalyze's own log line covers that)
+                // so the two don't read as the same silence on a device pull.
+                if !SyncAnalyzeBackgroundScheduler.schedule() {
+                    model.live.append(log: "background analyze: BGProcessingTask submit failed")
+                }
                 // #114: capture the LAST in-app live state on the way out so the Home widget matches what
                 // the user just saw — its battery/HR/score otherwise lag to the last FOREGROUND refreshSeq
                 // bump. One reload per app-exit is low-frequency and well within WidgetKit's daily budget.

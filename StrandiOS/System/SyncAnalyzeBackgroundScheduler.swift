@@ -45,12 +45,21 @@ enum SyncAnalyzeBackgroundScheduler {
 
     /// Submit one request. Called from the `.background` scene-phase transition; NOT called from inside
     /// the task's own body — see the type doc for why this is deliberately one-shot, not self-re-arming.
-    static func schedule() {
+    /// Returns whether the submit itself succeeded (distinct from whether iOS ever actually RUNS the
+    /// task, which this can't observe) — the caller logs a failure, since `runBackgroundAnalyze`'s own
+    /// "scored=" line only tells the device log the task fired at all, not that requesting it worked.
+    @discardableResult
+    static func schedule() -> Bool {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
         let request = BGProcessingTaskRequest(identifier: taskIdentifier)
         request.requiresExternalPower = false
         request.requiresNetworkConnectivity = false
-        try? BGTaskScheduler.shared.submit(request)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            return true
+        } catch {
+            return false
+        }
     }
 
     static func cancel() {

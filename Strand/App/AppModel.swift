@@ -609,6 +609,16 @@ final class AppModel: ObservableObject {
             live.append(log: "background analyze: skipped, offload/analyze already in flight")
             return
         }
+        // #1005-STORM: claim `live.analyzing` manually, same reasoning as `refreshAfterCompletedBackfill`
+        // above (`:614-628`) — `analyzeIfStale` calls `analyzeRecent`, whose own `computing = true` lands
+        // AFTER two suspension points (`repo.storeHandle()`, `store.hrFingerprint()`), leaving a window
+        // where neither `backfilling` nor `analyzing` is true yet the pass is already reading the store. A
+        // periodic/strap trigger landing in that window would start an offload against data this pass is
+        // mid-read on — the exact overlap the whole branch exists to remove. The mirror sink may flip this
+        // false a little early once `analyzeRecent`'s own `computing` clears; that's fine here too, for the
+        // same reason it's fine there.
+        live.analyzing = true
+        defer { live.analyzing = false }
         let scored = await intelligence.analyzeIfStale()
         live.append(log: "background analyze: scored=\(scored)")
         guard scored else { return }

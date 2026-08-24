@@ -182,9 +182,14 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 
   For Commit 5: if any `background analyze:` line appears, `scored=true` only on a pass that
   genuinely had nothing scored yet (not on every backgrounding), and at most one "Sync complete"
-  notification per deferred night. A build with no qualifying disconnect during the check window may
-  legitimately show zero `background analyze:` lines — that is not itself a failure, just untested;
-  note it rather than treating it as a pass.
+  notification per deferred night. **Expect zero `background analyze:` lines, or one with
+  `scored=false`, most mornings — that is the LIKELY outcome, not a failure.**
+  `BGProcessingTaskRequest` scheduling is discretionary; iOS strongly prefers running it while
+  charging and idle, typically hours after submission, by which point the user has almost always
+  already reopened the app and the foreground path (`refreshAfterCompletedBackfill`) already scored
+  the night — so the deferred wake finds nothing new and correctly no-ops. Treat a quiet log as
+  untested, not broken; only a `BGProcessingTask submit failed` line, or a `scored=true` line that
+  should have been `false` (or vice versa), is evidence of an actual defect.
 - check-after: 2026-08-24
 
 ## Settled
