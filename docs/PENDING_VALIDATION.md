@@ -100,55 +100,6 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   and the `Whoop5HistoricalTests` tripwire, which are deliberate and must be removed knowingly.
 - check-after: 2026-09-20
 
-### Duplicate R-R ingest: the historical-wins rule has never run against a real night
-- id: rr-historical-authority
-- shipped: branch `fix/rr-duplicate-ingest` 2026-08-19 (#1451) — `WhoopStore.insertHistorical` +
-  Kotlin `WhoopRepository.insertHistorical`. A batch decoded from the strap's banked history now
-  CLEARS each wall-second it carries beats for before writing its own, so the live stream's copy of
-  those same heartbeats no longer survives beside it.
-- claim: (a) on a night with the phone connected throughout, stored R-R lands at ~1.0x the strap's
-  own `Σ rr_count` instead of the measured 1.65x, and no second carries beats from two batches;
-  (b) nothing legitimate is lost — seconds the strap banked no beats for keep their live rows, and
-  overall beat coverage does not fall below what the strap itself claims.
-- needs: one overnight offload on the fixed build, with the phone connected for the whole night
-  (that is the condition that produced the duplication — a disconnected stretch banks once and would
-  pass trivially).
-- blocked-because: 🟡 MEASURED 2026-08-20, BUT THE NIGHT DOES NOT COUNT — it ran on a PRE-FIX
-  binary. The fix landed on `main` at 2026-08-19 21:17 -0700, ~2 h before the night began, but the
-  phone was not rebuilt until 2026-08-20 09:13, so the overnight ingest used the old code. The night
-  therefore measures the BUG, not the fix, and cannot settle this entry.
-  WHAT IT DOES GIVE: the first real overnight baseline, and it is worse than the daytime figure
-  that motivated the fix. Over the full sleep window (2026-08-19 23:28:01→2026-08-20 07:43:16,
-  `v18AuxSample` n=29,711, phone connected throughout): claimed Σ rr_count 26,722 vs stored 53,123 —
-  **ratio 1.988** — with 23,483 duplicated `(ts, ord)` pairs across 26,300 reporting seconds
-  (**89.3 %**). Every hour from 00:00 to 08:00 sits at 1.95–1.99 with 85–93 % duplication, i.e. a
-  steady ~2.0, which this entry's own passes-if calls "the clear is not firing at all" — correct, it
-  was not in the binary. The 1.65x daytime measurement understated the nightly cost.
-  THE FIX DOES APPEAR TO WORK, on a window that cannot satisfy `needs`. Hourly ratios
-  break sharply at the install: 08:00 = 1.992 (86.2 % dup), 09:00 = 1.138 (7.2 %), 10:00 = 1.102
-  (0.59 %). A clean post-install slice, 09:20→10:22, reads **ratio 1.069 with 10 duplicated pairs
-  over 1,241 reporting seconds**. Ratio is inside the 1.0–1.1 pass band and the residual is the
-  handful `testALiveInsertNeverClearsAnything` predicts. But it is a ~1 h DAYTIME window, which is
-  exactly the case `needs` rules out as passing trivially, so it is corroboration, not the check.
-  NO OVER-DELETION: 3,411 seconds in the night carried a claimed count of 0, and 1,678 of them still
-  hold R-R rows, so the clear is not eating seconds the strap banked nothing for. Ratio never went
-  below 1.0 in any window.
-- check: pull the store and re-run the Phase 0 analysis over the new night —
-  `xcrun devicectl device copy from --device 00008150-000E434E3AD8401C --domain-type
-  appDataContainer --domain-identifier com.bly.noop --source "Library/Application
-  Support/OpenWhoop/whoop.sqlite" …` (plus `-wal`/`-shm`), decode `v18AuxSample` with the repo's own
-  `V18AuxCodec`, then compare `Σ rr_count` against stored `rrInterval` rows for the night and count
-  seconds holding two rows with the same `ord`.
-- passes-if: stored ÷ claimed sits at 1.0–1.1 across the night (it was 1.65 before, ~2.0 per
-  connected half-hour), AND duplicated-`ord` seconds are either 0 or a handful — under 0.5 % of
-  reporting seconds, clustered at offload boundaries rather than spread through every connected
-  half-hour. That residual is EXPECTED and is pinned by `testALiveInsertNeverClearsAnything`: a live
-  flush landing after the historical batch for the same second still leaves both rows, and the
-  Collector buffers ~30 readings before flushing. A steady ~2.0 means the clear is not firing at all;
-  a ratio well BELOW 1.0 means it deletes more than it replaces and is the worse failure — check that
-  seconds the strap claimed 0 beats for still hold their live rows.
-- check-after: 2026-08-21
-
 ### The sync-rescore-storm fix reduces re-score CPU and Commit 5's BGProcessingTask actually fires
 - id: sync-rescore-storm-fix
 - shipped: `fix/sync-rescore-storm` branch, commits `59771a02`..`08a7824f` (#1005-STORM), 2026-08-23
@@ -299,4 +250,8 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 
 ## Settled
 
-_(nothing yet)_
+- **rr-historical-authority** (2026-08-25): duplicate R-R ingest fix (#1451) confirmed against a
+  genuine qualifying night (2026-08-24→25, phone connected throughout bar one 61s BLE gap, on-device
+  build 227 postdates the fix). Stored ÷ claimed `Σ rr_count` = 1.0022 (was 1.988 pre-fix), 1 of
+  30,144 seconds with a duplicated `ord` (0.0033%, at the tail — not the 85–93%-per-half-hour bug
+  pattern), no over-deletion (51 of 3,856 zero-claim seconds still hold live rows). Passes-if met.
