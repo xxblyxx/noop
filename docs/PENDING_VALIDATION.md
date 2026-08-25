@@ -200,7 +200,13 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   - **Cause of the miss, confirmed by code reading before the pull:** the original plan's Commit 1
     specified a 15-min minimum interval between FORCED passes, and it was **never implemented** — no
     time-based gate exists in `analyzeRecent`'s entry (`IntelligenceEngine.swift:478-513`) or in
-    `refreshAfterCompletedBackfill`, and the plan's corrections section never records dropping it.
+    `refreshAfterCompletedBackfill`. It was not silently dropped: `59771a02`'s commit message defers
+    it openly ("Both need more care than the 5h usage window allowed today"), alongside the
+    `skipIfUnchanged` whole-store `hrFingerprint()` gate, whose named blocker there is **#1392**, not
+    #1196. Only the plan *file*'s corrections section is silent on it. Relatedly, `066d5624` did NOT
+    revert a narrowed fingerprint gate — its diff never touches `IntelligenceEngine.swift`; what it
+    reverted was the Kotlin `POST_BACKFILL_ANALYZE_DELAY_MS` constant. The narrowing was never
+    written at all.
     A pre-pull prediction from the code alone (~6-7 min per 47 min) matched the measurement (~7.9 min
     per 44.4 min), so the mechanism is understood rather than guessed.
   - **What demonstrably works on hardware:** the 30 s debounce coalesced both morning auto-continue
