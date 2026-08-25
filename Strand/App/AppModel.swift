@@ -493,18 +493,35 @@ final class AppModel: ObservableObject {
                 // the one-shot done flag is set, purges any pollution, and rescores the affected days , so a
                 // wandering-clock strap can't keep re-polluting. A no-op when nothing's pending.
                 await self.intelligence.runTimestampHealIfNeeded()
-                // #836: the steady-state tick is a BACKSTOP, not a data-driven refresh — every real update
-                // (sync backfill, import, edit, recalibrate, heal) already rescores via its own forced call.
-                // `force: false` skips the heavy 21-day rescore when the raw HR stream is unchanged since the
-                // last run, instead of re-reading ~21×54 h of HR every 15 min on a big-import library. A new
-                // sample (the heal above, or a sync) moves the fingerprint and the tick rescores as before.
-                // `trigger: .idleTick` (#1005-STORM 2026-08-25): subject to `AnalyzePolicy`'s forced-pass
-                // floor, so a tick landing soon after another AUTOMATIC pass just scored the same window
-                // defers instead of re-running it — see `AnalyzePolicy`'s doc for why.
-                await self.intelligence.analyzeRecent(force: false, trigger: .idleTick)
-                // v5: recompute the skin-temp suite snapshots (cycle phase + body clock) from the
-                // freshly-scored history so the Health hub cards read a ready result.
-                await self.refreshV5Signals()
+                // #1005-STORM (2026-08-25): wait out an in-flight offload before this tick's own re-score,
+                // the same bounded-poll shape as `hasActiveImport` above and `refreshAfterCompletedBackfill`'s
+                // `live.backfilling` wait — closes a mechanism gap (this loop had NO overlap guard at all;
+                // `refreshAfterCompletedBackfill` got one, this loop didn't). Not a demonstrated large cost on
+                // its own (the measured 2026-08-25 overlaps from this loop were 1–3 s, at a resume boundary),
+                // but a morning launch landing mid-offload should start scoring after quiescence, not on top
+                // of it. Skips this tick entirely (rather than proceeding regardless) if the cap is hit with
+                // a pass STILL genuinely in flight — the next tick, or the post-offload path, picks it up.
+                var backfillWaited = 0
+                while self.live.backfilling && !Task.isCancelled && backfillWaited < 120 {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    backfillWaited += 1
+                }
+                if self.live.backfilling || self.live.analyzing {
+                    self.live.append(log: "analyze: idle tick skipped — sync still in flight")
+                } else {
+                    // #836: the steady-state tick is a BACKSTOP, not a data-driven refresh — every real update
+                    // (sync backfill, import, edit, recalibrate, heal) already rescores via its own forced call.
+                    // `force: false` skips the heavy 21-day rescore when the raw HR stream is unchanged since the
+                    // last run, instead of re-reading ~21×54 h of HR every 15 min on a big-import library. A new
+                    // sample (the heal above, or a sync) moves the fingerprint and the tick rescores as before.
+                    // `trigger: .idleTick` (#1005-STORM 2026-08-25): subject to `AnalyzePolicy`'s forced-pass
+                    // floor, so a tick landing soon after another AUTOMATIC pass just scored the same window
+                    // defers instead of re-running it — see `AnalyzePolicy`'s doc for why.
+                    await self.intelligence.analyzeRecent(force: false, trigger: .idleTick)
+                    // v5: recompute the skin-temp suite snapshots (cycle phase + body clock) from the
+                    // freshly-scored history so the Health hub cards read a ready result.
+                    await self.refreshV5Signals()
+                }
                 // #836 battery: 30-min BACKSTOP cadence (twin of Android ANALYZE_INTERVAL_MS). The
                 // `force: false` gate above can't skip while the strap streams live HR — the fingerprint
                 // advances every second — so this re-scored the whole 21-day window every 15 min even though
