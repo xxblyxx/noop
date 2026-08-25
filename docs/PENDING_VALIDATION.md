@@ -230,6 +230,22 @@ difference between "we checked and it held" and "someone got tired of seeing it.
     flight — NOT the narrower target case (disconnect right after HISTORY_COMPLETE, before the 30 s
     debounce fires). ~40 min unplugged is also well inside normal discretionary `BGProcessingTask`
     latency.
+  - ⚠️ **2026-08-25, later the same day: the rescore-floor commits (`0f45525e`..`bd03d1e3`) were built
+    and installed to device `819D37A3` via `xcrun devicectl device install app` — an UPGRADE install
+    over the existing `com.bly.noop`, NOT a fresh uninstall+reinstall.** The original plan's Commit 5
+    text says plainly: "a `UIBackgroundModes` change does not take effect on an upgrade install from
+    Xcode in all cases; reinstall to be sure." The owner declined a fresh uninstall on 2026-08-25 to
+    avoid losing the on-device store (no cloud sync, no `.noopbak` backup taken first) — a reasonable
+    call, but it means Commit 5's `processing` background mode / `BGTaskSchedulerPermittedIdentifiers`
+    entry may not have actually re-registered with iOS on this device since it first shipped
+    (`3f434482`, 2026-08-23), independent of anything the rescore-floor commits changed. **So a
+    continued absence of `background analyze:` lines in a future pull is now AMBIGUOUS between two
+    causes**: (a) the likely, expected outcome already documented below (opportunistic scheduling,
+    foreground usually beats it to the punch), or (b) the entitlement/background-mode registration
+    genuinely never took hold on this install. This check cannot tell those apart by itself — if it
+    stays quiet past a few real mornings, the next step is a fresh uninstall+reinstall (with a
+    `.noopbak` export taken first) specifically to rule out (b), not another log pull on the same
+    install.
   - **Progress bar: UNTESTED.** That half is observational only and no log or store pull can answer
     it; nobody was watching Today during this window.
   - **Coverage limit:** `strapLog.generations` held only three short sessions from 08:13-08:15, so
