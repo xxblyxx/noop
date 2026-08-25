@@ -185,8 +185,53 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   debounce fires. Confirming the progress-bar fixes needs eyes-on during a real sync: watch the bar
   sweep (not jump), watch it survive a strap disconnect/reconnect mid-sync without getting stuck or
   vanishing, and confirm it clears once the analyze pass actually finishes.
-- blocked-because: implemented 2026-08-23, review + fixes landed 2026-08-24; no morning sync has
-  occurred yet on the fixed build.
+- blocked-because: 🟡 **PARTIALLY VALIDATED 2026-08-25 — direction confirmed, targets missed, and
+  two halves of the claim remain untested.** First post-fix log pull (window 08:16:09→09:00:32,
+  44.4 min, 591 lines). Build identity confirmed: the tail contains `Backfill: strap deferred (a
+  rescore is in flight)`, a string introduced by `5478d84f` on this branch and absent on `main`.
+  - **Five passes, ~7.9 min of re-score CPU / 44.4 min (18% duty), vs. the 10 passes / 21.5 min /
+    47 min (46%) baseline.** A real ~2.5x reduction, well short of the ≤2 passes / <2 min target.
+  - ⚠️ **`re-score: done` reports WALL CLOCK, not CPU** (`Date().timeIntervalSince(reScoreStart)`).
+    The raw sum was 1217.7 s = 20.3 min, but the 1021.3 s pass spans a ~742 s process suspension —
+    `[08:20:47] Reconnecting in 3s (attempt 1)` produced no attempt until `[08:33:09] Connecting`,
+    and a 3 s `asyncAfter` taking 12.4 min only happens in a suspended process. Adjusted worst pass
+    ≈ 279 s. Every future check of this entry must apply the same correction; the 2026-08-23 573 s
+    baseline outlier had two backfills inside it and so was demonstrably awake.
+  - **Cause of the miss, confirmed by code reading before the pull:** the original plan's Commit 1
+    specified a 15-min minimum interval between FORCED passes, and it was **never implemented** — no
+    time-based gate exists in `analyzeRecent`'s entry (`IntelligenceEngine.swift:478-513`) or in
+    `refreshAfterCompletedBackfill`, and the plan's corrections section never records dropping it.
+    A pre-pull prediction from the code alone (~6-7 min per 47 min) matched the measurement (~7.9 min
+    per 44.4 min), so the mechanism is understood rather than guessed.
+  - **What demonstrably works on hardware:** the 30 s debounce coalesced both morning auto-continue
+    bursts (3 sessions at 08:45:22/31/32 → one pass; 3 at 08:53:19/25/28 → one pass) — the case the
+    evening baseline never exercised; and the `live.analyzing` reverse guard fired for real
+    (`[08:33:46] Backfill: strap deferred`).
+  - **The `#899-A` re-arm chain is now the visible residue of the storm.** Passes 1→2→3 are one
+    causal chain: each post-offload forced call landed while a pass held `computing`, so
+    `pendingForcedRescore` re-armed it to run immediately after — 90 s of re-scoring the same 7
+    nights, twice, in the 3 minutes after a pass that had just scored them (`dayCache reused=6/21`
+    on the third, so not cheap-because-cached).
+  - **One residual overlap, small.** Pass 1 was the launch-time cadence-loop pass
+    (`AppModel.swift:463-485`, `analyzeRecent(force: false)`), which has no `live.backfilling` check
+    — the branch added that guard to `refreshAfterCompletedBackfill` only. It overlapped offloads at
+    both ends (the 08:16:11-12 sessions at its start, the 08:33:11 `.connect` session at its finish),
+    1-3 s each. Mechanism gap worth closing; not a demonstrated large cost. `BLEManager:3981` defers
+    only `.periodic`/`.strap` on `state.analyzing` — `.connect`/`.foreground`/`.manual` never defer,
+    by design.
+  - **Commit 5: UNTESTED, not failed.** Zero `background analyze:` lines, which `passes-if` below
+    already names as the likely outcome. The 08:20:47 disconnect was mid-pass, with work already in
+    flight — NOT the narrower target case (disconnect right after HISTORY_COMPLETE, before the 30 s
+    debounce fires). ~40 min unplugged is also well inside normal discretionary `BGProcessingTask`
+    latency.
+  - **Progress bar: UNTESTED.** That half is observational only and no log or store pull can answer
+    it; nobody was watching Today during this window.
+  - **Coverage limit:** `strapLog.generations` held only three short sessions from 08:13-08:15, so
+    the overnight backlog offload may have occurred in a rolled-away session. The 08:33 session
+    persisted 3,234 rows across 1 night — real, but plausibly the tail of a morning sync rather than
+    the sync itself. This measured a morning window, not necessarily the worst one.
+  - Follow-up fix plan requested the same day; the floor, the re-arm chain, the cadence-loop guard
+    and the unrepaired `hrFingerprint()` gate are its scope.
 - check:
   ```
   xcrun devicectl device copy from --device 819D37A3-B45A-56CF-9FEC-40D460EC74F8 \
@@ -198,12 +243,16 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   check can tell "never fired" apart from "fired and no-opped") to see whether/how often the
   BGProcessingTask ran. For the progress bar: eyes-on during a live sync (no store pull can tell you
   whether the bar visually swept or jumped — this half of the check is observational, not a log grep).
-- passes-if: | metric | baseline (2026-08-23) | target |
-  |---|---|---|
-  | re-score passes per ~47 min | 10 | ≤ 2 |
-  | total re-score CPU per ~47 min | 21.5 min | < 2 min |
-  | passes overlapping a backfill | 1 (573 s) | **0** |
-  | worst single pass | 573 s | ≤ 60 s |
+- passes-if: | metric | baseline (2026-08-23, evening) | target | measured (2026-08-25, morning) |
+  |---|---|---|---|
+  | re-score passes per ~45 min | 10 | ≤ 2 | 5 ❌ |
+  | total re-score CPU per ~45 min | 21.5 min | < 2 min | ~7.9 min ❌ (20.3 min wall) |
+  | passes overlapping a backfill | 1 (573 s) | **0** | 1 ❌ (1-3 s, cadence-loop pass) |
+  | worst single pass | 573 s | ≤ 60 s | ~279 s ❌ (1021 s wall) |
+
+  ⚠️ The wall/CPU distinction in the fourth column is not optional bookkeeping — see
+  `blocked-because`. Subtract any process suspension inside a pass's span before comparing it to the
+  ≤ 60 s target, or the number is meaningless.
 
   For Commit 5: if any `background analyze:` line appears, `scored=true` only on a pass that
   genuinely had nothing scored yet (not on every backgrounding), and at most one "Sync complete"
@@ -220,7 +269,11 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   than jumping straight to ~70%; it never sits stuck at a stale fraction after a disconnect/reconnect
   mid-sync; it never vanishes while a backfill is still genuinely running. Any of those failing is
   evidence the epoch guard, entry gating, or reentrancy fix has its own bug.
-- check-after: 2026-08-25
+- check-after: 2026-08-28
+  (bumped from 2026-08-25 after the partial check recorded in `blocked-because`. What is still
+  owed: the CPU/pass-count half re-measured once the follow-up floor fix lands; one eyes-on morning
+  sync for the progress bar; and Commit 5's narrower disconnect-right-after-HISTORY_COMPLETE case.
+  The entry stays Open until all three are answered — the 2026-08-25 pull settles none of them.)
 
 ## Settled
 
