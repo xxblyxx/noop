@@ -36,6 +36,12 @@ final class IntelligenceEngine: ObservableObject {
     /// that really was scored. This counter is independent of `wmKey` entirely, so that failure mode can't
     /// reach it.
     private(set) var completedPassCount = 0
+    /// #1005-STORM (2026-08-25): non-nil while an AUTOMATIC re-score trigger (`.postOffload`/`.idleTick`)
+    /// was REJECTED by `AnalyzePolicy`'s forced-pass floor — see `floorDecision(for:)`. Published so
+    /// `AppModel` can schedule exactly one coalesced retry at this instant (`init()`'s
+    /// `$deferredRescoreDueAt` sink); cleared the moment a pass actually starts (`analyzeRecent`, where
+    /// `computing = true` is set), so a stale value can never linger past the retry it caused.
+    @Published private(set) var deferredRescoreDueAt: Date?
 
     /// #899-A re-arm: a `force: true` recompute (a post-backfill rescore AppModel kicks off after a sync)
     /// that arrives while an idle-tick pass already holds the `computing` lock would otherwise be SILENTLY
@@ -473,10 +479,34 @@ final class IntelligenceEngine: ObservableObject {
         UserDefaults.standard.set(false, forKey: Self.timestampHealPendingKey)
     }
 
+    /// #1005-STORM (2026-08-25): synchronous, no `await` — deliberately, so it adds no new suspension
+    /// point ahead of the existing `guard !computing` and cannot widen the pre-existing check-and-set race
+    /// between `repo.storeHandle()`/`store.hrFingerprint()` and `computing = true` (documented, not fixed,
+    /// in the 2026-08-23 plan's corrections #3 , this call sits entirely before that window).
+    func floorDecision(for trigger: AnalyzeTrigger) -> AnalyzeDecision {
+        let last = UserDefaults.standard.object(forKey: Self.lastPassEndedAtKey) as? Double
+        return AnalyzePolicy.decide(trigger: trigger, now: Date().timeIntervalSince1970,
+                                    lastPassEndedAt: last, tzOffsetSec: TimeZone.current.secondsFromGMT())
+    }
+
     /// Compute on-device scores for each of the last `maxDays` that actually has raw HR data.
     /// Personal baselines (HRV / resting HR) are folded from the imported history, so even the first
     /// live night can be scored against your norm.
-    func analyzeRecent(maxDays: Int = 21, force: Bool = true, skipIfUnchanged: Bool = false) async {
+    func analyzeRecent(maxDays: Int = 21, force: Bool = true, skipIfUnchanged: Bool = false,
+                       trigger: AnalyzeTrigger = .dataChange) async {
+        // #1005-STORM (2026-08-25): the AUTOMATIC-cadence floor, checked FIRST — before the `#899-A` lock
+        // guard and before any store read, so a floored trigger costs nothing and never sets
+        // `pendingForcedRescore` (the re-arm chain this exists to break can't start from this direction).
+        // `trigger` defaults to `.dataChange`, which `AnalyzePolicy` always runs , so every pre-existing
+        // caller (manual re-score, import, sleep/workout edit, recalibrate, the #547 heal above, the #313
+        // Effort rescore) is untouched by this gate unless it opts into `.postOffload`/`.idleTick`/
+        // `.background`. See `AnalyzePolicy`'s doc for why: nothing here caps CORRECTNESS, only how often
+        // the AUTOMATIC cadence may run a pass that nothing new requires.
+        if case .deferUntil(let dueAt) = floorDecision(for: trigger) {
+            deferredRescoreDueAt = Date(timeIntervalSince1970: dueAt)
+            diagnosticSink?("analyze: floored (trigger=\(trigger), \(Int(Date().timeIntervalSince1970 - (dueAt - AnalyzePolicy.forcedFloorSeconds)))s since last pass, retry in \(Int(dueAt - Date().timeIntervalSince1970))s)", nil)
+            return
+        }
         // #899-A: a concurrent pass already holds the lock. A NON-forced idle tick is safe to drop (the
         // in-flight pass already covers the same window). But a FORCED call is a real update path (a
         // post-backfill rescore after a sync) , dropping it would leave a freshly-synced night unscored
@@ -542,6 +572,10 @@ final class IntelligenceEngine: ObservableObject {
         // and how long (the CPU cost per run), so a re-score STORM is visible in the strap log.
         let reScoreStart = Date()
         computing = true
+        // #1005-STORM: this pass is actually running now, so any pending floor-retry it may have caused
+        // is moot — clear it. If THIS pass itself later gets floor-rejected on some future re-arm, that
+        // re-arm sets it fresh; this only clears the value that led to the run that is starting right now.
+        deferredRescoreDueAt = nil
         // #899-A re-arm: clear the lock, then if a forced rescore was dropped while this pass held it,
         // run it ONCE. The flag is cleared BEFORE the re-invoke (a single re-arm), so a forced call landing
         // DURING the re-invoke re-arms it again but a quiet one does not , this can never recurse unbounded.
@@ -2149,6 +2183,18 @@ final class IntelligenceEngine: ObservableObject {
         // `completedPassCount`'s doc for why the watermark string can't be trusted for this on its own.
         // After the cancellation check above, so a cancelled pass doesn't count as completed.
         if !Task.isCancelled { completedPassCount += 1 }
+        // #1005-STORM (2026-08-25): advance the floor's watermark. Gated on `!Task.isCancelled` ONLY —
+        // deliberately NOT combined with the `!wmKey.isEmpty` check the watermark write above uses. That
+        // is a DIFFERENT, stricter gate (a transient `hrFingerprint()` throw empties `wmKey` via `try?`);
+        // reusing it here would leave the floor un-advanced on a fingerprint hiccup even though a full pass
+        // just ran, wedging the floor open and reproducing the exact storm this exists to stop — the same
+        // class of bug review finding #6 already fixed once for `completedPassCount` above. A cancelled
+        // pass deliberately does NOT advance the floor (it may have `break`-ed out of the day loop early,
+        // §`Task.isCancelled` checks below), so a cancelled pass can be immediately followed by a full one
+        // — the safe direction, matching the watermark/`completedPassCount` precedent just above.
+        if !Task.isCancelled {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastPassEndedAtKey)
+        }
     }
 
     /// Background-task entry point (#1005-STORM, `SyncAnalyzeBackgroundScheduler`): score already-banked
@@ -2163,7 +2209,7 @@ final class IntelligenceEngine: ObservableObject {
     /// See `completedPassCount`'s doc for the full failure mode this replaces.
     func analyzeIfStale() async -> Bool {
         let before = completedPassCount
-        await analyzeRecent(force: false)
+        await analyzeRecent(force: false, trigger: .background)
         return completedPassCount != before
     }
 
@@ -2171,6 +2217,13 @@ final class IntelligenceEngine: ObservableObject {
     /// `analyzeRecent` scored against. A non-forced tick whose current fingerprint equals this skips the
     /// 21-day rescore; cleared implicitly by any HR insert/delete (the fingerprint moves), so it self-heals.
     private static let analyzeWatermarkKey = "noop.analyzeWatermark"
+    /// #1005-STORM (2026-08-25): UserDefaults key for `AnalyzePolicy`'s forced-pass floor — the wall-clock
+    /// instant the last AUTOMATIC (`.postOffload`/`.idleTick`) pass that ran to completion finished. Device-
+    /// local scheduling state, not analytics output — deliberately NOT added to
+    /// `Packages/WhoopStore/Sources/WhoopStore/BackupSettings.swift`'s `.noopbak` whitelist, matching
+    /// `analyzeWatermarkKey`'s existing precedent, so restoring a backup can never import another device's
+    /// scheduling state.
+    private static let lastPassEndedAtKey = "noop.analyze.lastPassEndedAt"
 
     /// CAPTURE-B (#814/#799): build the universal `dayOwner …` self-diagnostic line VERBATIM (the Test
     /// Centre export parser depends on this exact shape). `readId` is the owner this day was read+scored

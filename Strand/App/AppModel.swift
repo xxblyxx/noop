@@ -69,6 +69,11 @@ final class AppModel: ObservableObject {
     /// after it fully finishes.
     private var refreshInFlight = false
     private var pendingPostOffloadRefresh = false
+    /// #1005-STORM (2026-08-25): the single outstanding retry for a re-score `AnalyzePolicy` floored —
+    /// see `init()`'s `intelligence.$deferredRescoreDueAt` sink. Cancelled and replaced whenever a new
+    /// deferral supersedes it, so at most one retry is ever pending (coalesced, matching the
+    /// `refreshInFlight`/`pendingPostOffloadRefresh` pair's shape above).
+    private var analyzeFloorRetry: Task<Void, Never>?
 
     /// Opt-in AI coach (bring-your-own-key) , the one networked feature, off until the user enables it.
     let coach: AICoachEngine
@@ -233,6 +238,28 @@ final class AppModel: ObservableObject {
         self.intelligence.$computing
             .removeDuplicates()
             .sink { [live] computing in live.analyzing = computing }
+            .store(in: &hrCancellables)
+        // #1005-STORM (2026-08-25): a re-score `AnalyzePolicy` floored gets exactly one coalesced retry
+        // at the deferred instant. Ignores the sink's nil emissions (the engine clears the value the
+        // moment a pass actually starts running , nothing to retry there, that pass IS the retry).
+        // Routes through `refreshAfterCompletedBackfill`, not a raw `analyzeRecent` call, so the retry
+        // inherits that function's reentrancy guard, its bounded `live.backfilling` wait, and its bar
+        // teardown , a bare retry into the engine would re-open the overlap window this branch exists to
+        // close. `[weak self]` on both the outer sink and the inner `Task`: this class outlives the app
+        // session, but a stray retry must never keep a torn-down model alive.
+        self.intelligence.$deferredRescoreDueAt
+            .compactMap { $0 }
+            .sink { [weak self] dueAt in
+                self?.analyzeFloorRetry?.cancel()
+                self?.analyzeFloorRetry = Task { [weak self] in
+                    let delaySeconds = dueAt.timeIntervalSinceNow
+                    if delaySeconds > 0 {
+                        try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+                    }
+                    guard !Task.isCancelled else { return }
+                    await self?.refreshAfterCompletedBackfill()
+                }
+            }
             .store(in: &hrCancellables)
         // Workouts & GPS test mode (Test Centre): wire the Repository (auto-detect inputs/why + cross-source
         // dedup decisions) and the GPS recorder (fix-progress) tagged sinks to the SAME shareable strap log.
@@ -471,7 +498,10 @@ final class AppModel: ObservableObject {
                 // `force: false` skips the heavy 21-day rescore when the raw HR stream is unchanged since the
                 // last run, instead of re-reading ~21×54 h of HR every 15 min on a big-import library. A new
                 // sample (the heal above, or a sync) moves the fingerprint and the tick rescores as before.
-                await self.intelligence.analyzeRecent(force: false)
+                // `trigger: .idleTick` (#1005-STORM 2026-08-25): subject to `AnalyzePolicy`'s forced-pass
+                // floor, so a tick landing soon after another AUTOMATIC pass just scored the same window
+                // defers instead of re-running it — see `AnalyzePolicy`'s doc for why.
+                await self.intelligence.analyzeRecent(force: false, trigger: .idleTick)
                 // v5: recompute the skin-temp suite snapshots (cycle phase + body clock) from the
                 // freshly-scored history so the Health hub cards read a ready result.
                 await self.refreshV5Signals()
@@ -481,7 +511,18 @@ final class AppModel: ObservableObject {
                 // only today's daytime HR changed. It's a pure backstop (every real update rescores via its
                 // own forced call above), so halving the cadence only delays the idle refresh of today's
                 // live Effort/steps; recovery/sleep are night-computed and unaffected.
-                try? await Task.sleep(nanoseconds: 1_800_000_000_000)  // 30 min backstop (#836 battery)
+                // #1005-STORM (2026-08-25): if the tick above was floored, sleep only until the floor's
+                // retry instant instead of the full 30 min — the `intelligence.$deferredRescoreDueAt` sink
+                // in `init()` already schedules a retry independently, so this is a secondary, redundant-but-
+                // harmless path to the same outcome (whichever fires first wins; the other's `analyzeRecent`
+                // call is a normal, cheap re-check against the (by-then-likely-satisfied) floor).
+                let sleepSeconds: Double
+                if let dueAt = self.intelligence.deferredRescoreDueAt {
+                    sleepSeconds = min(1800, max(1, dueAt.timeIntervalSinceNow))
+                } else {
+                    sleepSeconds = 1800
+                }
+                try? await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
             }
         }
     }
@@ -721,19 +762,33 @@ final class AppModel: ObservableObject {
         // instead of churning it, which was surfacing as a Trends/streak "0 days" flicker. Only this
         // post-offload caller opts in; every other analyzeRecent path still forces unconditionally.
         //
-        // #1005-STORM: drive the progress bar's analyze phase with a background tick loop, since
-        // `analyzeRecent` is one opaque `await` with no per-day callback out to here (see `SyncProgress`'s
-        // doc for why — wiring a real per-day signal out of its `Task.detached` loop is out of scope).
-        // Cancelled via the `defer` the instant `analyzeRecent` returns, success or failure.
-        syncProgress.beginAnalyze()
-        let progressTick = Task { [syncProgress] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                await MainActor.run { syncProgress.tickAnalyzeEstimate() }
+        // #1005-STORM (2026-08-25): the AUTOMATIC-cadence floor. Checked HERE, not earlier — after
+        // `repo.refresh(days: 120)` above, so a floored pass still surfaces the newly-offloaded raw to
+        // Trends/streak reads (skipping THAT is the #1196 flicker shape; skipping only the analyze pass
+        // is not). Deliberately falls through to the rest of the function rather than an early `return` —
+        // only `beginAnalyze()`/the progress-tick loop/`analyzeRecent` are skipped. Skipping `beginAnalyze()`
+        // also avoids flipping the bar out of `.offload` phase for a pass that will not run (the same
+        // failure mode the 2026-08-23 plan's correction #7 finding 5 already fixed once, from a different
+        // cause). `analyzeRecent` itself re-checks the SAME floor on its own entry — this outer check exists
+        // only so the bar and the tick loop are never armed for a pass that is about to be floored anyway.
+        let floored = intelligence.floorDecision(for: .postOffload)
+        if case .run = floored {
+            // #1005-STORM: drive the progress bar's analyze phase with a background tick loop, since
+            // `analyzeRecent` is one opaque `await` with no per-day callback out to here (see `SyncProgress`'s
+            // doc for why — wiring a real per-day signal out of its `Task.detached` loop is out of scope).
+            // Cancelled via the `defer` the instant `analyzeRecent` returns, success or failure.
+            syncProgress.beginAnalyze()
+            let progressTick = Task { [syncProgress] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    await MainActor.run { syncProgress.tickAnalyzeEstimate() }
+                }
             }
+            defer { progressTick.cancel() }
+            await intelligence.analyzeRecent(skipIfUnchanged: true, trigger: .postOffload)
+        } else {
+            live.append(log: "Backfill: analyze floored (a pass ran too recently) — dashboard cache refresh still applied")
         }
-        defer { progressTick.cancel() }
-        await intelligence.analyzeRecent(skipIfUnchanged: true)
         await refreshV5Signals()
         #if os(iOS)
         // #980: a strap backfill routinely completes while the app is BACKGROUNDED (it runs as a
