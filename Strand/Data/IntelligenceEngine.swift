@@ -50,6 +50,17 @@ final class IntelligenceEngine: ObservableObject {
     /// `defer` re-invokes `analyzeRecent(force: true)` ONCE when it clears. A single re-arm (the flag is
     /// cleared BEFORE the re-invoke) bounds it to one extra pass , no recompute storm.
     private var pendingForcedRescore = false
+    /// #1005-STORM (2026-08-25): the trigger/gate of the call that set `pendingForcedRescore` above, so
+    /// the re-arm's re-invoke (the `defer` below) carries the dropped call's actual identity instead of
+    /// hardcoding `force: true` with no trigger and no `skipIfUnchanged` — which used to silently discard
+    /// the post-offload caller's own no-op gate on every re-arm. Merge rule when several forced calls drop
+    /// against one in-flight pass (the boolean flag above already collapses them to a single re-arm):
+    /// MOST PRIVILEGED WINS — once a `.dataChange` drop (heal/import/edit/recalibrate) has been recorded,
+    /// a later `.postOffload` drop against the SAME in-flight pass may never overwrite it. A real data
+    /// event must never be silently downgraded into something the floor (`AnalyzePolicy`) is later allowed
+    /// to defer.
+    private var pendingForcedRescoreTrigger: AnalyzeTrigger?
+    private var pendingForcedRescoreSkipIfUnchanged = false
     /// #899 heal bound: true while the last heal already re-armed a rescore, so a heal firing again on
     /// the very next pass cannot re-arm a second time (the Android twin is hard-bounded to exactly one
     /// re-pass; this mirrors it). Reset by any pass whose heal finds nothing, restoring the budget.
@@ -511,7 +522,17 @@ final class IntelligenceEngine: ObservableObject {
         // in-flight pass already covers the same window). But a FORCED call is a real update path (a
         // post-backfill rescore after a sync) , dropping it would leave a freshly-synced night unscored
         // until the next cycle. Re-arm instead: flag it so the running pass's `defer` re-invokes once.
-        guard !computing else { if force { pendingForcedRescore = true }; return }
+        guard !computing else {
+            if force {
+                pendingForcedRescore = true
+                // #1005-STORM: most-privileged-wins merge — see `pendingForcedRescoreTrigger`'s doc.
+                if pendingForcedRescoreTrigger == nil || trigger == .dataChange {
+                    pendingForcedRescoreTrigger = trigger
+                    pendingForcedRescoreSkipIfUnchanged = skipIfUnchanged
+                }
+            }
+            return
+        }
         guard let store = await repo.storeHandle() else { note = String(localized: "No on-device store yet."); return }
         guard let hrvCfg = Baselines.metricCfg["hrv"],
               let rhrCfg = Baselines.metricCfg["resting_hr"],
@@ -592,11 +613,26 @@ final class IntelligenceEngine: ObservableObject {
             // the next real trigger fires.
             let wasPendingForcedRescore = pendingForcedRescore
             pendingForcedRescore = false
+            // #1005-STORM: carry the dropped call's trigger/gate into the re-invoke, then reset both
+            // unconditionally — same reasoning as `pendingForcedRescore` just above (review finding #5):
+            // never let a carried value leak into some later, unrelated pass's re-arm.
+            let rearmTrigger = pendingForcedRescoreTrigger ?? .dataChange
+            let rearmSkipIfUnchanged = pendingForcedRescoreSkipIfUnchanged
+            pendingForcedRescoreTrigger = nil
+            pendingForcedRescoreSkipIfUnchanged = false
             if wasPendingForcedRescore, !Task.isCancelled {
                 // Carry THIS pass's window into the re-pass: a heal firing during a wide one-shot pass
                 // must re-score the same width, not the default 21 days (Kotlin re-passes with the same
                 // maxDays; keep the platforms in lockstep).
-                Task { await self.analyzeRecent(maxDays: maxDays, force: true) }
+                // #1005-STORM: also carry the trigger/skipIfUnchanged (see above). Because this re-invoke
+                // runs after the just-completed pass's `lastPassEndedAt` write (below), a `.postOffload`
+                // re-arm is now floored by `AnalyzePolicy` on its own entry and becomes a single deferred
+                // retry instead of an immediate second pass — this is what collapses a measured
+                // trigger→drop→immediate-rerun chain into trigger→drop→one-deferred-rerun.
+                Task {
+                    await self.analyzeRecent(maxDays: maxDays, force: true,
+                                             skipIfUnchanged: rearmSkipIfUnchanged, trigger: rearmTrigger)
+                }
             }
         }
 
