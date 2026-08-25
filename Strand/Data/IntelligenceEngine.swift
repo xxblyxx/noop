@@ -522,16 +522,21 @@ final class IntelligenceEngine: ObservableObject {
             diagnosticSink?("re-score: trigger=post-offload newData=no — skipped (nothing changed since last run)", nil)
             return
         }
-        // Attribute a FORCED re-score. A completed offload / edit / recalibrate always re-scores
-        // (force: true) past the gate above, so an empty/duplicate offload — nothing changed since the last
-        // run — still pays for a full maxDays pass over the whole raw store (#1146). `newData=no` means the
-        // fingerprint already equals the watermark the last run advanced: a re-score driven by the trigger,
-        // not by data (#1005 background battery). Diagnostic only; the pass still runs. Twin of the Android
-        // WhoopBleClient post-offload attribution.
-        if force {
-            let hadNew = wmKey.isEmpty || UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey) != wmKey
-            diagnosticSink?("re-score: trigger=forced newData=\(hadNew ? "yes" : "no (nothing changed since last run)")", nil)
-        }
+        // Attribute EVERY pass that reaches here, forced or not. A completed offload / edit / recalibrate
+        // always re-scores (force: true) past the gate above, so an empty/duplicate offload — nothing
+        // changed since the last run — still pays for a full maxDays pass over the whole raw store (#1146).
+        // `newData=no` means the fingerprint already equals the watermark the last run advanced: a re-score
+        // driven by the trigger, not by data (#1005 background battery). Diagnostic only; the pass still
+        // runs. Twin of the Android WhoopBleClient post-offload attribution.
+        // #1005-STORM (2026-08-25 correction): previously gated on `if force`, so the cadence-loop's
+        // `force: false` idle tick — the common caller — left no attribution line at all. A device log
+        // pulled 2026-08-25 had 5 `re-score: done` lines but only 4 `re-score: trigger=` lines, and the
+        // missing one (the biggest pass, 1021 s) had to be identified by inference instead of read directly.
+        // Emitting unconditionally closes that gap. A non-forced pass reaching this point always has
+        // `hadNew == true` — the fingerprint gate just above (`:508-511`) already returned early on
+        // `!hadNew`, so this is not a new code path for that case, only a name for one that already ran.
+        let hadNew = wmKey.isEmpty || UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey) != wmKey
+        diagnosticSink?("re-score: trigger=\(force ? "forced" : "idle-tick") newData=\(hadNew ? "yes" : "no (nothing changed since last run)")", nil)
 
         // #1005: time the whole pass — the trigger line above records WHY; this records how many nights
         // and how long (the CPU cost per run), so a re-score STORM is visible in the strap log.
