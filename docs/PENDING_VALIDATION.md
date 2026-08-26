@@ -248,6 +248,95 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   sync for the progress bar; and Commit 5's narrower disconnect-right-after-HISTORY_COMPLETE case.
   The entry stays Open until all three are answered — the 2026-08-25 pull settles none of them.)
 
+### The analyze-pass-cost diagnostics are readable on a real morning, and the #1575 port didn't break trace replay
+- id: analyze-pass-cost-instrumentation
+- shipped: `fix/analyze-pass-cost` 2026-08-26 — `4104608d` (Commit 1: `analyzeRecent cost prep=/score=`,
+  ported from upstream #1559; the honest `reused/(reused+cacheable)` denominator from upstream #1556;
+  and our own `analyzeRecent dayCache DROPPED — sig changed:` plus `eligible=`/`ownerFamilyNil=`) and
+  `a2eac10d` (Commit 1b: port of upstream #1575 — `dayCacheEligible = true`, and `hrvWindowDetail` added
+  to `AnalyzeRecentDayCache.cacheKey`). Plan: `docs/superpowers/plans/2026-08-26-analyze-pass-cost.md`.
+  Built and installed to device `819D37A3` 2026-08-26 09:46 (upgrade install, same caveat as the
+  sibling entry above).
+- claim: **Two claims, neither of them a speedup — do not read this entry as "the perf fix is pending."**
+  Commits 1 and 1b make the pass *measurable* and remove a latent trap; they make it no faster, and the
+  morning is expected to feel exactly as slow as it did on 2026-08-26.
+  (a) The three new diagnostic lines appear on every completed pass, pair up with `re-score: done`, and
+  are DECISIVE — i.e. they actually distinguish a pass-signature drop from per-day eligibility, which is
+  the ambiguity that made the 2026-08-26 investigation rest on inference.
+  (b) With a Test Centre trace active, a reused night now emits the same trace lines as a freshly-scored
+  one (the Swift replay path at `IntelligenceEngine.swift:1407/1410/1413` covers `.sleep`/`.hrv`/
+  `.steps`), and the `hrvWindowDetail` key component invalidates exactly one day at local midnight.
+- needs: one morning where the app is opened and the launch cadence tick runs a full pass — plus, for
+  claim (b) ONLY, a separate session with the Sleep or HRV Test Centre trace deliberately switched on
+  and left on across a local-midnight rollover.
+- blocked-because: **Claim (a)** is only hours old — installed 2026-08-26 09:46, after that morning's
+  sync had already happened, so the canonical launch-pass measurement is the NEXT morning. (The
+  post-install sync the owner started at ~09:50 the same day may already carry a partial answer: a first
+  pass logging `cold process (no previous signature)` and, if a second pass follows, the `sig changed:`
+  line that actually matters. Worth grepping opportunistically, but it is not the morning case.)
+  **Claim (b) is entirely unobserved and is the larger debt.** No Test Centre trace has ever been active
+  on this device (`testcentre.active.workouts = False` is the only such key in the plist, and it is off),
+  so the code path Commit 1b now depends on — a cache HIT replaying three trace arrays — has never once
+  run. The package tests pin the key's invalidation contract, not the replay. Nobody has seen a traced
+  night reused. The owner was advised NOT to turn traces on, because they add log noise and burn the
+  2,000-line tail; that advice is right for claim (a) and is exactly what leaves claim (b) unchecked, so
+  (b) needs a deliberate, separate session rather than riding along on a normal morning.
+  Also: no Kotlin twin was written for either commit and Android keeps the pre-#1575 gate, so the two
+  platforms are knowingly out of step here — recorded in `a2eac10d`, not a thing this check can settle.
+- check:
+  ```
+  xcrun devicectl device copy from --device 819D37A3-B45A-56CF-9FEC-40D460EC74F8 \
+    --domain-type appDataContainer --domain-identifier com.bly.noop \
+    --source "Library/Preferences/com.bly.noop.plist" --destination /tmp/prefs.plist
+  python3 - <<'PY'
+  import plistlib
+  L = plistlib.load(open("/tmp/prefs.plist","rb"))["strapLog.tail"]
+  for l in L:
+      if any(k in l for k in ("re-score:","dayCache","analyzeRecent cost","analyze: floored")):
+          print(l[:200])
+  PY
+  ```
+  ⚠️ The plist key is `strapLog.tail` with a LITERAL DOT — `plutil -extract strapLog.tail` treats it as
+  a key path and fails. Use `plistlib`, as above. (The two sibling plans both record the broken command.)
+  Retention: 2,000 lines live plus 3 generations × 1,000 (`LiveState.tailLimit`,
+  `maxLogGenerations`, `generationTailLimit`) — roughly 2h20m of a connected morning, so pull within a
+  few hours of the sync or the launch pass rolls off.
+- passes-if:
+  **Claim (a) — all four must hold:**
+  1. `grep -c 'analyzeRecent cost'` **equals** `grep -c 're-score: done'`. Fewer means a pass exited on a
+     path that skips the tally.
+  2. The reuse line reads `reused=N/M ... days=21` where **M ≤ 21 and M reflects days with data** (8 on
+     this store as of 2026-08-26), not a flat 21. A warm pass should now read something like `7/8`, not
+     the misleading `7/21` that already cost one investigation.
+  3. The FIRST `DROPPED` line of a process reads `cold process (no previous signature)` — expected and
+     uninformative. **The SECOND pass is the one that decides Commit 2.**
+  4. `prep` and `score` are both non-zero on a cold pass and both ~0 on a fully-warm one.
+
+  **What the second pass means — decided NOW, before seeing it:**
+  - `DROPPED — sig changed:` naming `sleepNeedHours`, `sleepConsistency` and/or `habitualMidsleepSec`
+    → Commit 2's premise **holds**; quantize those three as planned.
+  - `DROPPED — sig changed:` naming something else → Commit 2 as written is **wrong**; fix whatever it
+    names instead and rewrite that commit. Do not ship the quantization because the plan predicted it.
+  - **No `DROPPED` line at all, yet `reused=0`** → the drop was never a signature change; read
+    `eligible=` and `ownerFamilyNil=` on the reuse line, and Commit 2's premise is **refuted**.
+  - No second cold pass at all (the second pass reads `reused=7/8`) → the 2026-08-26 double-cold-pass
+    was not reproducible; re-measure before building anything.
+
+  **Commit 4 gate, from the same log:** `prep ≫ score` → build the sliding window; `score ≫ prep` →
+  **do not build it**, whatever the row counts suggest. Upstream's prior is 60–84% reads, but that is
+  their hardware and their store, and this device's unexplained ~9x-per-night cost gap means the prior
+  may not transfer.
+
+  **Claim (b) — a separate traced session:** with the Sleep or HRV trace on, a pass reporting
+  `reused=N/M` with N>0 still emits the full per-day trace block for the reused nights (identical in
+  content and ordering to a freshly-scored night), and across local midnight exactly ONE day
+  re-scores rather than the whole window. A reused night emitting FEWER trace lines than a fresh one is
+  the failure this claim exists to catch, and it would mean the gate should not have been flipped.
+- check-after: 2026-08-27
+  (the first full morning after install. Claim (b) has no natural date — it needs a deliberate traced
+  session and will almost certainly outlive this `check-after`; when claim (a) settles, keep the entry
+  Open for (b) and bump rather than settling the whole entry on the easy half.)
+
 ## Settled
 
 - **rr-historical-authority** (2026-08-25): duplicate R-R ingest fix (#1451) confirmed against a
