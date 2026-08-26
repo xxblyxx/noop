@@ -772,9 +772,25 @@ final class IntelligenceEngine: ObservableObject {
         // detached loop.
         let useSleepStagerV2Global = PuffinExperiment.experimentalSleepV2Enabled
         let useMotionAwareWakeGlobal = PuffinExperiment.motionAwareWakeEnabled
-        // Cache eligibility for the whole pass: never reuse while a Test-Centre trace is active (a cached
-        // scan carries no fresh gate trace). Owner-level eligibility (registered WHOOP) is checked per day.
-        let dayCacheEligible = !(sleepTraceActive || hrvTraceActive || stepsTraceActive)
+        // Cache eligibility for the whole pass. Owner-level eligibility (registered WHOOP) is checked per day.
+        //
+        // #1575: an active Test-Centre trace NO LONGER disables reuse. It used to, on the reasoning that a
+        // reused night would not re-emit its gate trace — but in Swift that reasoning was already false:
+        // `DayScan` carries `sleepTrace` / `hrvTrace` / `stepsTrace`, a cache hit appends the whole scan to
+        // `out`, and the main-actor fold below replays ALL THREE from the scan (`.sleep`, `.hrv`, `.steps`)
+        // for every entry including hits. Verified in this file before flipping the gate — that replay is
+        // the load-bearing half; if it covered only some of the three, this change would silently drop trace
+        // lines. So the gate was the ONLY thing costing a full re-read + re-score of every night on every
+        // pass whenever a diagnostic was switched on, i.e. the diagnostic cost roughly what it was
+        // measuring (upstream measured `prep=211663ms score=38583ms` — 13 minutes of CPU in a 70-minute
+        // session, purely for having a trace on).
+        //
+        // This matters here specifically because the analyze-pass-cost work turns traces ON to investigate;
+        // left alone, the instrument would dominate the measurement it exists to take.
+        //
+        // Kept as a named constant rather than deleted: the per-day reuse block below reads it, and a future
+        // reason to disable reuse pass-wide (an experiment that changes scoring mid-pass, say) belongs here.
+        let dayCacheEligible = true
         // The pass config signature — every input that feeds `analyzeDay` but is NOT in the per-day key, so
         // a change to any of them must invalidate every cached night. All are pass-global 28-night / profile
         // / toggle values (stable across an offload storm; they move only on a settings/profile/import edit
@@ -945,9 +961,16 @@ final class IntelligenceEngine: ObservableObject {
                         skinAnchorResolvedOwners.insert(owner)
                     }
                     if let fp = try? await store.hrFingerprint(deviceId: owner, from: from, to: to) {
-                        let key = AnalyzeRecentDayCache.cacheKey(owner: owner, hrCount: fp.count,
-                                                                 hrMaxTs: fp.maxTs,
-                                                                 skinAnchorRaw: skinAnchorByOwner[owner])
+                        let key = AnalyzeRecentDayCache.cacheKey(
+                            owner: owner, hrCount: fp.count, hrMaxTs: fp.maxTs,
+                            skinAnchorRaw: skinAnchorByOwner[owner],
+                            // #1575: the `hrvTraceActive &&` matters. With the HRV trace OFF no detail line
+                            // is ever produced, so the flag describes nothing — but it would still flip at
+                            // local midnight and invalidate yesterday, charging EVERY user an extra day's
+                            // re-score to protect lines they never see. Gating it keeps the default path
+                            // exactly as it was. Must stay in lockstep with the `hrvWindowDetail:` argument
+                            // passed to `analyzeDay` below, which is what actually decides the emit.
+                            hrvWindowDetail: hrvTraceActive && dayStart == nowLocalMidnight)
                         dayCacheKey = key
                         if let cached = dayScanCacheLocal[day], cached.key == key {
                             out.append(cached.scan)

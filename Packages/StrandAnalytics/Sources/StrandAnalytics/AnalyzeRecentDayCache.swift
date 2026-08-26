@@ -35,8 +35,26 @@ public enum AnalyzeRecentDayCache {
     /// Inputs that feed `analyzeDay` but are pass-global rather than per-day (profile, baselines1, sleep
     /// need / consistency, habitual midsleep, tz, stager toggles) are NOT in this key — the engine drops the
     /// whole cache when its pass config signature changes, which covers them.
-    public static func cacheKey(owner: String, hrCount: Int, hrMaxTs: Int, skinAnchorRaw: Double?) -> String {
+    public static func cacheKey(owner: String, hrCount: Int, hrMaxTs: Int, skinAnchorRaw: Double?,
+                                // #1575: whether this day is the one entitled to emit the PER-WINDOW HRV
+                                // DETAIL (`dayStart == nowLocalMidnight`, and only while the HRV trace is
+                                // on). Now that an active trace no longer disables reuse outright, this has
+                                // to invalidate: the night cached as "today" with its detailed trace becomes
+                                // an ordinary night after midnight, and a fresh scan would emit only the
+                                // one-line summary for it. Without this the reused night would keep
+                                // replaying detail it is no longer entitled to — and the cache's whole
+                                // promise is that a reused night is indistinguishable from a freshly-scored
+                                // one. Costs one day's re-score per local-midnight rollover, and ONLY while
+                                // a trace mode is on (the caller gates the flag on `hrvTraceActive`, so with
+                                // the trace off this is constantly `false` and the default path is
+                                // unchanged).
+                                //
+                                // DELIBERATELY NOT DEFAULTED. Upstream's #1567 was caused by precisely that
+                                // — a defaulted parameter a caller silently omitted, which quietly changed
+                                // the skin-temp scale and made a night score to nothing. Every call site
+                                // states its answer.
+                                hrvWindowDetail: Bool) -> String {
         let anchor = skinAnchorRaw.map { String($0.bitPattern) } ?? "nil"
-        return "\(owner)|\(hrCount):\(hrMaxTs):\(anchor)"
+        return "\(owner)|\(hrCount):\(hrMaxTs):\(anchor):\(hrvWindowDetail ? "d" : "s")"
     }
 }
