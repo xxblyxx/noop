@@ -781,22 +781,53 @@ final class IntelligenceEngine: ObservableObject {
         // or at midnight), so the cache survives the back-to-back passes. baselines1 is signed structurally
         // (any BaselineState field change ⇒ a different string); Doubles by raw bit-pattern (exact, locale-
         // free). Only ever compared to itself in memory, so cross-platform string identity isn't required.
-        let dayCacheConfigSig = [
-            String(describing: baselines1.hrv),
-            String(describing: baselines1.restingHR),
-            String(up.age.bitPattern), up.sex, String(up.stepTicksPerStep.bitPattern),
-            maxHR.map { String($0.bitPattern) } ?? "nil",
-            "\(tzOffset)",
-            String(sleepNeedHours.bitPattern),
-            sleepConsistency.map { String($0.bitPattern) } ?? "nil",
-            habitualMidsleepSec.map { "\($0)" } ?? "nil",
-            "\(useSleepStagerV2Global)", "\(useMotionAwareWakeGlobal)", "\(deepHrvWindow)",
-            "\(spo2CandidateDisplayOn)",
-        ].joined(separator: "|")
+        //
+        // #1005-COST: carried as (name, value) PAIRS rather than a bare [String] so a drop can say WHICH
+        // component moved (see the `DROPPED` diagnostic below). The joined value is byte-identical to the
+        // previous `[String].joined(separator: "|")` — same components, same order, same separator — so
+        // this restructure invalidates no cache and changes no behaviour.
+        let dayCacheConfigParts: [(name: String, value: String)] = [
+            ("baselines1.hrv", String(describing: baselines1.hrv)),
+            ("baselines1.restingHR", String(describing: baselines1.restingHR)),
+            ("profile.age", String(up.age.bitPattern)),
+            ("profile.sex", up.sex),
+            ("profile.stepTicksPerStep", String(up.stepTicksPerStep.bitPattern)),
+            ("maxHR", maxHR.map { String($0.bitPattern) } ?? "nil"),
+            ("tzOffset", "\(tzOffset)"),
+            ("sleepNeedHours", String(sleepNeedHours.bitPattern)),
+            ("sleepConsistency", sleepConsistency.map { String($0.bitPattern) } ?? "nil"),
+            ("habitualMidsleepSec", habitualMidsleepSec.map { "\($0)" } ?? "nil"),
+            ("useSleepStagerV2", "\(useSleepStagerV2Global)"),
+            ("useMotionAwareWake", "\(useMotionAwareWakeGlobal)"),
+            ("deepHrvWindow", "\(deepHrvWindow)"),
+            ("spo2CandidateDisplay", "\(spo2CandidateDisplayOn)"),
+        ]
+        let dayCacheConfigSig = dayCacheConfigParts.map(\.value).joined(separator: "|")
         // Drop the whole cache on a config change, then snapshot it into a Sendable `let` for the detached
         // loop (the engine is @MainActor; the loop can't touch `self`). The loop returns the updated cache
         // and we write it back after `.value`.
         if dayCacheConfigSig != dayScanCacheConfigSig {
+            // #1005-COST: name the component(s) that moved. A whole-cache drop is by far the most expensive
+            // thing that can happen to a pass (measured 2026-08-26: a cold pass cost 775s against a warm
+            // pass reusing 7 of 8 nights), and until now the log said only `reused=0/21` — which cannot
+            // distinguish "the pass signature changed" from "per-day eligibility was off for every day".
+            // The comment above asserts every component is "stable across an offload storm"; the same claim
+            // was already proven false once for `baselines1` (#1402), and the 2026-08-26 device log shows a
+            // second full cold pass following every launch pass, so the claim is under suspicion again.
+            // NAMES ONLY, never values — a signature component can carry profile data (age, sex).
+            // The previous signature is empty on the first pass of a process (the in-memory cache starts
+            // cold by construction), which is not a "change" worth attributing — say so instead of listing
+            // all 14 components.
+            if dayScanCacheConfigSig.isEmpty {
+                diagnosticSink?("analyzeRecent dayCache DROPPED — cold process (no previous signature)", nil)
+            } else {
+                let previous = dayScanCacheConfigSig.components(separatedBy: "|")
+                let moved = dayCacheConfigParts.enumerated()
+                    .filter { idx, part in idx >= previous.count || previous[idx] != part.value }
+                    .map(\.element.name)
+                diagnosticSink?("analyzeRecent dayCache DROPPED — sig changed: "
+                                + (moved.isEmpty ? "?" : moved.joined(separator: ",")), nil)
+            }
             dayScanCache.removeAll()
             dayScanCacheConfigSig = dayCacheConfigSig
         }
@@ -831,6 +862,26 @@ final class IntelligenceEngine: ObservableObject {
             // diagnostic carried on `skippedDayLines`.
             var dayScanCacheLocal = inDayScanCache
             var dayCacheReused = 0
+            // #1005-COST (port of upstream #1559): per-phase cost tally. `prep` brackets the windowed store
+            // reads plus the session matching that sits between them and `analyzeDay`; `score` brackets
+            // `analyzeDay` itself. The pass has only ever timed itself END TO END, so whether the measured
+            // ~33 s per night (2026-08-26, this device) is spent materialising ~2.25 windows' worth of rows
+            // or inside `analyzeDay` is unmeasured — and that split is what decides whether narrowing the
+            // read windows is worth building at all. Measured, not guessed.
+            var dayPrepSeconds = 0.0
+            var dayScoreSeconds = 0.0
+            // #1005-COST (port of upstream #1556): days that were actually CACHEABLE this pass (freshly
+            // scored AND stored under a key). Together with `dayCacheReused` this is the honest denominator
+            // for the reuse ratio: `maxDays` counts loop iterations, so a store holding 8 real nights in a
+            // 21-day window could never report better than 8/21 — which reads like a broken cache and is in
+            // fact a healthy one. That misreading has already cost one investigation.
+            var dayCacheCacheable = 0
+            // #1005-COST: days whose per-day reuse was skipped because `DeviceFamily.forRegistryDevice`
+            // returned nil (registry unreadable, or the owner row is missing model/brand). This is the
+            // residual half of "eligibility disabled reuse" once the whole-pass trace gate is gone, and it
+            // is otherwise indistinguishable in the log from a signature drop. Upstream hit the same class
+            // of silent registry absence in #1567; the remedy there was the same — make it say so.
+            var dayOwnerFamilyNil = 0
             for offset in 0..<maxDays {
                 // #1005-STORM (review finding #5): cooperative cancellation. `scanTask` does NOT
                 // auto-inherit cancellation (`Task.detached` is deliberately not a structured child) —
@@ -871,10 +922,14 @@ final class IntelligenceEngine: ObservableObject {
                 // baselines1/toggles) already dropped the whole cache above on change. A miss falls straight
                 // through to the identical full path.
                 var dayCacheKey: String? = nil
-                if dayCacheEligible,
-                   let ownerFamily = DeviceFamily.forRegistryDevice(
-                        model: regDevices.first(where: { $0.id == owner })?.model,
-                        brand: regDevices.first(where: { $0.id == owner })?.brand) {
+                // #1005-COST: resolved OUTSIDE the `if` so a nil family can be counted. `forRegistryDevice`
+                // returning nil silently disables reuse for this day, and in the log that is
+                // indistinguishable from a pass-signature drop — both read as `reused=0`.
+                let ownerFamily = DeviceFamily.forRegistryDevice(
+                    model: regDevices.first(where: { $0.id == owner })?.model,
+                    brand: regDevices.first(where: { $0.id == owner })?.brand)
+                if ownerFamily == nil { dayOwnerFamilyNil += 1 }
+                if dayCacheEligible, let ownerFamily {
                     // Resolve the 4.0 window-wide anchor BEFORE the gate (it's a key input); once per owner,
                     // reads the sparse skin stream — not the big HR one. This pre-populates `skinAnchorByOwner`,
                     // so the existing per-day anchor block below sees the owner already resolved and is a
@@ -902,8 +957,17 @@ final class IntelligenceEngine: ObservableObject {
                     }
                 }
 
+                // #1005-COST: the READ+PREP phase starts here. Deliberately AFTER the reuse `continue`
+                // above, so a cache hit contributes nothing to either tally — a hit's whole point is that it
+                // performs neither phase.
+                let tPrep0 = Date()
                 let hr = (try? await store.hrSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
                 guard hr.count >= 200 else {
+                    // This day still paid for its read; count it, or the tally under-reports exactly the
+                    // sparse-history installs where reads dominate most. On this device 13 of the 21 day
+                    // slots take this path (2026-08-26: `SKIPPED hrSamples=0`), so dropping them here would
+                    // hide a real and recurring share of the cost.
+                    dayPrepSeconds += Date().timeIntervalSince(tPrep0)
                     skippedDayLines.append("sleep day=\(day) SKIPPED hrSamples=\(hr.count) (need ≥200)")
                     continue
                 }
@@ -1078,6 +1142,10 @@ final class IntelligenceEngine: ObservableObject {
                 } else {
                     providedSleep = []
                 }
+                // #1005-COST: the prep→score boundary. Everything above this line is store reads plus the
+                // session matching between them; everything `analyzeDay` does is below it.
+                let tScore0 = Date()
+                dayPrepSeconds += tScore0.timeIntervalSince(tPrep0)
                 let res = AnalyticsEngine.analyzeDay(day: day, hr: hr, rr: rr, resp: resp,
                                                      vendorResp: vendorResp, gravity: grav,
                                                      steps: steps, dayHr: dayHr, daySteps: daySteps,
@@ -1108,6 +1176,7 @@ final class IntelligenceEngine: ObservableObject {
                                                      // ring buffer isn't flooded; every night keeps the summary.
                                                      hrvWindowDetail: dayStart == nowLocalMidnight,
                                                      deepHrvWindow: deepHrvWindow)
+                dayScoreSeconds += Date().timeIntervalSince(tScore0)
                 // #195: whole-night HRV cleaning-pipeline summary for the always-on strap log, so a "reads ~2x
                 // too high" report is triageable without the HRV test mode: RMSSD vs SDNN (rmssd >> sdnn =
                 // beat-to-beat jitter surviving the ectopic filter, not real HRV), meanNN as an HR sanity-check,
@@ -1331,7 +1400,10 @@ final class IntelligenceEngine: ObservableObject {
                 // #1005: cache this freshly-scored scan under its per-day key (only when the day was
                 // cache-eligible this pass, i.e. a registered WHOOP owner with no trace active). Reused
                 // days `continue`d above and never reach here, so the cache only ever holds fresh scans.
-                if let key = dayCacheKey { dayScanCacheLocal[day] = (key: key, scan: scan) }
+                if let key = dayCacheKey {
+                    dayScanCacheLocal[day] = (key: key, scan: scan)
+                    dayCacheCacheable += 1
+                }
                 out.append(scan)
             }
             // #1005: prune the reuse cache to the current 21-day window (the oldest day ages out at
@@ -1339,8 +1411,23 @@ final class IntelligenceEngine: ObservableObject {
             let dayCacheWindow = Set((0..<maxDays).map {
                 AnalyticsEngine.dayString(nowLocalMidnight - $0 * 86_400, offsetSec: tzOffset) })
             dayScanCacheLocal = dayScanCacheLocal.filter { dayCacheWindow.contains($0.key) }
-            skippedDayLines.append("analyzeRecent dayCache reused=\(dayCacheReused)/\(maxDays) "
-                                   + "size=\(dayScanCacheLocal.count)")
+            // #1005-COST: the denominator is now `reused + cacheable` — the days that COULD have been
+            // reused — not `maxDays`, which counts loop iterations including day slots that hold no data.
+            // `days=` keeps the window size visible so the two are never confused again. `eligible` and
+            // `ownerFamilyNil` disambiguate a `reused=0` that comes from per-day eligibility from one that
+            // comes from the pass-signature drop reported by the `DROPPED` line above.
+            skippedDayLines.append("analyzeRecent dayCache reused=\(dayCacheReused)/"
+                                   + "\(dayCacheReused + dayCacheCacheable) "
+                                   + "size=\(dayScanCacheLocal.count) days=\(maxDays) "
+                                   + "eligible=\(dayCacheEligible) ownerFamilyNil=\(dayOwnerFamilyNil)")
+            // #1005-COST: where the pass actually goes. `prep` is the windowed store reads plus the session
+            // matching between them; `score` is `analyzeDay`. The two do NOT sum to the pass total — pass 2,
+            // the baseline folds and the reconciliation all sit outside this loop — so read them as a RATIO,
+            // which is the only thing the question needs. Reads dominating means the 54-hour window on a
+            // 24-hour stride (each row materialised ~2.25x per pass) is worth narrowing; `analyzeDay`
+            // dominating means it is not, whatever the row counts look like.
+            skippedDayLines.append("analyzeRecent cost prep=\(Int(dayPrepSeconds * 1000))ms "
+                                   + "score=\(Int(dayScoreSeconds * 1000))ms")
             return (out, skippedDayLines, dayScanCacheLocal)
         }
         let (scanned, skippedDayLines, updatedDayScanCache) = await withTaskCancellationHandler {
