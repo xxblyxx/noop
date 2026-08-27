@@ -810,9 +810,16 @@ final class IntelligenceEngine: ObservableObject {
             ("profile.stepTicksPerStep", String(up.stepTicksPerStep.bitPattern)),
             ("maxHR", maxHR.map { String($0.bitPattern) } ?? "nil"),
             ("tzOffset", "\(tzOffset)"),
-            ("sleepNeedHours", String(sleepNeedHours.bitPattern)),
-            ("sleepConsistency", sleepConsistency.map { String($0.bitPattern) } ?? "nil"),
-            ("habitualMidsleepSec", habitualMidsleepSec.map { "\($0)" } ?? "nil"),
+            // #1005-CHURN: the three `computeHabitualSleep`-derived inputs are folded QUANTIZED, not by
+            // raw bit-pattern. All three are computed from the `-noop` sleep sessions a PREVIOUS pass
+            // banked, so folding them exactly made the pass feed its own output back into its own cache
+            // identity — measured 2026-08-27 as a second full cold pass on every launch, drop reason
+            // `sig changed: sleepNeedHours,sleepConsistency`, re-scoring 9 nights to byte-identical
+            // results. The quanta sit far below display resolution, so a REAL change still invalidates.
+            // Signature only — `analyzeDay` below still receives the full-precision values.
+            ("sleepNeedHours", AnalyzeRecentConfigSignature.sleepNeedHours(sleepNeedHours)),
+            ("sleepConsistency", AnalyzeRecentConfigSignature.sleepConsistency(sleepConsistency)),
+            ("habitualMidsleepSec", AnalyzeRecentConfigSignature.habitualMidsleepSec(habitualMidsleepSec)),
             ("useSleepStagerV2", "\(useSleepStagerV2Global)"),
             ("useMotionAwareWake", "\(useMotionAwareWakeGlobal)"),
             ("deepHrvWindow", "\(deepHrvWindow)"),

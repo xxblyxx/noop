@@ -58,3 +58,77 @@ public enum AnalyzeRecentDayCache {
         return "\(owner)|\(hrCount):\(hrMaxTs):\(anchor):\(hrvWindowDetail ? "d" : "s")"
     }
 }
+
+/// The PASS-GLOBAL half of `analyzeRecent`'s cache identity: how the three `computeHabitualSleep`-derived
+/// inputs are encoded into the pass config signature.
+///
+/// The defect this closes (measured 2026-08-27, this device). The signature folded these three by raw
+/// `bitPattern`, and all three are derived from the computed `-noop` sleep sessions **a previous pass
+/// banked**. So the pass fed its own output back into its own cache identity: pass 1 banks the night, pass
+/// 2's `computeHabitualSleep` reads a fractionally different `nightlyHours`, the signature moves, and the
+/// whole cache is dropped — every night re-read and re-scored. The device log named it outright:
+///
+///     analyzeRecent dayCache DROPPED — sig changed: sleepNeedHours,sleepConsistency
+///
+/// …on a pass whose 9 nights were all sitting in the cache the previous pass had just filled, and which
+/// then produced byte-identical output for every one of them. 255 s of pure waste, every launch.
+///
+/// **Quantize rather than drop.** These are genuine scoring inputs: a real change (a habitual bedtime
+/// actually shifting, a new night extending the window) MUST still invalidate, or every cached night goes
+/// stale against a real profile change — a correctness regression traded for speed. Rounding to a quantum
+/// far below display resolution keeps that invalidation and removes only the re-banking noise.
+///
+/// **Signature-only.** Nothing here touches what reaches `analyzeDay` — the full-precision values still
+/// thread through to scoring unchanged, so no score, tier or displayed number moves. That separation is the
+/// whole safety argument for this change and `AnalyzeRecentConfigSignatureTests` pins it.
+///
+/// Quantizing is a noise filter, not a guarantee: a value drifting across a quantum boundary still
+/// invalidates. That degrades to exactly today's behaviour (one extra cold pass), never to a wrong score.
+///
+/// Compared only against itself, in memory, on one platform — so, like `cacheKey`, the Kotlin twin must
+/// match the invalidation RULES and need not produce byte-identical strings.
+public enum AnalyzeRecentConfigSignature {
+    /// Personalised sleep need, to the nearest **0.25 h**. The value feeds Rest's need term; a 15-minute
+    /// quantum is far below what moves a displayed score, and it is stable against the minute-level drift a
+    /// re-banked session produces.
+    public static let sleepNeedQuantumHours = 0.25
+    /// Sleep regularity (a 0…1 index), to **2 decimal places**.
+    public static let sleepConsistencyQuantum = 0.01
+    /// Habitual midsleep, to the nearest **5 minutes**. It selects an overnight band; 300 s is well inside
+    /// that band's own width.
+    public static let habitualMidsleepQuantumSec = 300
+
+    public static func sleepNeedHours(_ hours: Double) -> String {
+        quantized(hours, quantum: sleepNeedQuantumHours) ?? String(hours.bitPattern)
+    }
+
+    public static func sleepConsistency(_ index: Double?) -> String {
+        guard let index else { return "nil" }
+        return quantized(index, quantum: sleepConsistencyQuantum) ?? String(index.bitPattern)
+    }
+
+    public static func habitualMidsleepSec(_ seconds: Int?) -> String {
+        guard let seconds else { return "nil" }
+        // Integer arithmetic, so no float rounding to reason about. `.rounded()` on the quotient would be
+        // half-away-from-zero; this is the same, written for Ints and symmetric about zero (a midsleep can
+        // sit before local midnight and be negative).
+        let q = habitualMidsleepQuantumSec
+        let steps = seconds >= 0 ? (seconds + q / 2) / q : -((-seconds + q / 2) / q)
+        return "\(steps)"
+    }
+
+    /// The quantum STEP INDEX as a string — never the re-multiplied Double, so there is no float formatting
+    /// or `-0.0`/`0.0` ambiguity in the signature.
+    ///
+    /// Returns nil, and the callers above fall back to the exact `bitPattern`, when the value cannot be
+    /// stepped safely. Both guards are load-bearing rather than defensive noise: `Int64(_:)` **traps** on a
+    /// NaN, an infinity, or anything outside `Int64`'s range, and this runs on every analyze pass, so a
+    /// degenerate upstream value would crash the app rather than mis-cache. Falling back to the raw bit
+    /// pattern is exactly the pre-quantization behaviour — correct, just unfiltered.
+    private static func quantized(_ value: Double, quantum: Double) -> String? {
+        guard value.isFinite, quantum > 0 else { return nil }
+        let steps = (value / quantum).rounded()
+        guard steps.magnitude < 9.0e15 else { return nil }
+        return String(Int64(steps))
+    }
+}

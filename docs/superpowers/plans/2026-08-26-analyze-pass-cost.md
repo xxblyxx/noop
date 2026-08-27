@@ -387,16 +387,28 @@ relying on that**; if it is non-zero, this is load-bearing and belongs in front 
 Ship it either way — it is a real defect with a proven upstream fix — but do not claim it fixed the
 measured symptom.
 
-**Kotlin twin: not required.** The signature is built in memory and compared only to itself; the
-strings are explicitly documented as not requiring cross-platform identity (`:782-783`). Quantizing
-changes **which** days recompute, never **what** they compute to. Not a decoder, formula, migration,
-or stored value. **Kotlin cannot be compiled on this machine (no JDK, no Android SDK) and no CI
-covers it — say so in the commit message.**
+**Kotlin twin: WRITTEN ANYWAY (revised 2026-08-27).** The plan originally said "not required", and the
+narrow claim behind that still holds — the signature is compared only to itself in memory and the strings
+are documented as not requiring cross-platform identity (`:782-783`), so this is not a decoder, formula,
+migration or stored value. **But that argument only justifies why byte-identity is unnecessary; it does
+not justify leaving Android with the same defect.** `android/…/analytics/IntelligenceEngine.kt:546-556`
+folds all three raw, exactly as Swift did, so the churn is present there too. The twin ships in this
+commit. **Kotlin cannot be compiled on this machine (no JDK, no Android SDK) and no CI covers it — say so
+in the commit message.**
 
 **Test (`Packages/StrandAnalytics`, runs in CI without a strap).** Extend
-`AnalyzeRecentDayCacheTests.swift` or add a sibling: a 3-minute drift in `habitualMidsleepSec` and a
+`AnalyzeRecentDayCacheTests.swift` or add a sibling: a within-step drift in `habitualMidsleepSec` and a
 sub-quantum drift in `sleepNeedHours` produce the **same** signature component; a 20-minute midsleep
 shift and a 0.5 h need change produce a **different** one. Mirrors #1402's guard-test shape.
+
+**Correction, found by the test as written (2026-08-27).** The first draft asserted a *3-minute* midsleep
+drift is absorbed by the 300 s quantum. **That is false in general and the test caught it:** 12 600 s sits
+exactly on a step boundary, so +180 s crosses into the next step and the signature moves. Quantization
+absorbs noise **within** a step, not across a boundary — the drift must be under half a quantum *and* not
+straddle an edge. The shipped tests assert the honest version (±2 min about a step centre) and pin the
+boundary case explicitly, so the limitation is recorded rather than hidden. It degrades to exactly the
+pre-change behaviour (one extra cold pass), never to a wrong score. If churn survives this fix, that is
+the reason, and the answer is a coarser quantum or a hysteresis band.
 
 ---
 

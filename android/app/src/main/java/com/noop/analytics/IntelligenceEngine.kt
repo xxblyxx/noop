@@ -547,8 +547,16 @@ object IntelligenceEngine {
             baselines1.hrv.toString(), baselines1.restingHR.toString(),
             profile.age.toString(), profile.sex.toString(), profile.stepTicksPerStep.toString(),
             maxHROverride?.toString() ?: "nil",
-            tzOffsetSeconds.toString(), sleepNeedHours.toString(),
-            sleepConsistency?.toString() ?: "nil", habitualMidsleepSec?.toString() ?: "nil",
+            tzOffsetSeconds.toString(),
+            // #1005-CHURN: the three computeHabitualSleep-derived inputs are folded QUANTIZED, not raw.
+            // All three are computed from the "-noop" sleep sessions a PREVIOUS pass banked, so folding
+            // them exactly made the pass feed its own output back into its own cache identity — measured
+            // on iOS 2026-08-27 as a second full cold pass on every launch, re-scoring every night to a
+            // byte-identical result. The quanta sit far below display resolution, so a REAL change still
+            // invalidates. Signature only — analyzeDay below still receives the full-precision values.
+            AnalyzeRecentConfigSignature.sleepNeedHours(sleepNeedHours),
+            AnalyzeRecentConfigSignature.sleepConsistency(sleepConsistency),
+            AnalyzeRecentConfigSignature.habitualMidsleepSec(habitualMidsleepSec),
             useExperimentalSleepV2.toString(), useMotionAwareWake.toString(),
             deepHrvWindow.toString(), spo2CandidateDisplay.toString(),
         ).joinToString("|")
