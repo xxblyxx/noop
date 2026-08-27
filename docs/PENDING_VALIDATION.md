@@ -363,7 +363,8 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   (bumped from 2026-08-27, which is now answered for claim (a) checks 1–3. The entry stays OPEN for
   claim (b) — still entirely unobserved, still needing a deliberate traced session — and for check 4's
   warm half, which cannot be seen until Commit 2 lands. Do not settle this entry on the easy half.
-  After Commit 2 (`de041d22`, installed —) the falsifiable prediction is: a morning's **second** pass
+  After Commit 2 (`de041d22`, built and installed to device `819D37A3` 2026-08-27 09:54) the
+  falsifiable prediction is: a morning's **second** pass
   reads `reused=9/9` and lands near 75 s.
   **Three ways that check can be misread, settled here in advance:**
   1. **Pass 1 will still be cold, and that is not a failure.** `dayScanCacheConfigSig` starts `""`, so
