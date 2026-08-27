@@ -359,6 +359,22 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   and pass end). That discriminator gates Commit 5 only.
   **Floor worth knowing:** total − (prep+score) ≈ 50–75 s and roughly constant — the pass-2 fold plus
   banking. A perfect day cache leaves a ~1-minute pass, not a zero-cost one.
+- claim (c) — Commit 3, the persisted day-scan cache (`Strand/Data/DayScanCacheStore.swift`): the
+  on-disk projection is COMPLETE for everything pass 2 reads, and the two invalidation holes closed
+  with it actually hold on a real device. Three sub-claims, none observed on hardware:
+  (c1) A relaunch reuses nights rather than re-scoring them — the whole point, and the only one a
+       normal morning tests.
+  (c2) **The #899 banked-sleep heal drops both caches.** The heal deletes banked sleep rows whose only
+       route into a later pass is `bandSleepStateSamples`, a pass-1 read NOT in the per-day key. Before
+       persistence this healed by accident on relaunch. There is a unit test for the store, but **no
+       test and no observation of the heal path itself** — it needs a night where `Dedup(#899): removed
+       N` is non-zero, which cannot be forced.
+  (c3) **A Test Centre trace toggle drops the cache** rather than replaying stale trace lines from a
+       persisted scan. Shares claim (b)'s blocker exactly — no trace has ever been active on this
+       device — so (b) and (c3) should be checked in the SAME deliberate traced session.
+  The projection omits 8 of `DayResult`'s 15 fields on the evidence that pass 2 reads none of them
+  (`testOmittedFieldsComeBackAtDayResultDefaults` pins the list). If any of those eight ever becomes
+  load-bearing in the fold, this cache silently feeds it a default. That is the standing risk.
 - check-after: 2026-09-03
   (bumped from 2026-08-27, which is now answered for claim (a) checks 1–3. The entry stays OPEN for
   claim (b) — still entirely unobserved, still needing a deliberate traced session — and for check 4's
@@ -379,7 +395,13 @@ difference between "we checked and it held" and "someone got tired of seeing it.
      threshold legitimately drops the cache once. Correct behaviour, covered by tests. Distinguish it
      by whether the store just gained a night, before blaming the quanta.
   If the quanta genuinely prove too fine, the fix is a coarser quantum or a hysteresis band — the
-  known boundary limitation is pinned by `testMidsleepStillInvalidatesAcrossAStepBoundary`.)
+  known boundary limitation is pinned by `testMidsleepStillInvalidatesAcrossAStepBoundary`.
+  **Commit 3 (persisted day-scan cache) ships alongside it and is separately observable in the same
+  log** — do not conflate them. Commit 2 shows in the SECOND pass (no `sig changed:` drop); Commit 3
+  shows in the FIRST (`dayCache LOADED N day(s) from disk`, then `reused=8/9` instead of a
+  `cold process` drop). Expected: pass 1 ~300 s instead of 2403 s. Materially worse than that means
+  the background penalty scales with something other than per-night work — a different finding, not a
+  failure of this commit. **Commit 3 carries its own unobserved claim (c) below.**)
 
 ## Settled
 

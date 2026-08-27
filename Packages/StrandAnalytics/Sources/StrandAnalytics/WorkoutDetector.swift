@@ -38,7 +38,11 @@ public struct UserProfile: Equatable, Sendable {
 }
 
 /// A detected workout window. All intensity fields are APPROXIMATE.
-public struct ExerciseSession: Equatable, Sendable {
+// #1005-WARM: `Codable` so a scored day can be cached to disk and reused after a relaunch (see the
+// app-side `DayScanCacheStore`). Encoding an analytics VALUE, not a stored analytics RESULT — the
+// cache is device-local, derived, rebuildable and excluded from `.noopbak`; nothing reads it but the
+// engine that wrote it, and a decode failure just costs the cold pass we already have.
+public struct ExerciseSession: Equatable, Sendable, Codable {
     public let start: Int
     public let end: Int
     public let avgHR: Double

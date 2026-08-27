@@ -151,7 +151,9 @@ final class IntelligenceEngine: ObservableObject {
     /// returned a `DayResult` across the `Task.detached` boundary under this project's `minimal` strict-
     /// concurrency setting (SWIFT_STRICT_CONCURRENCY: minimal, Swift 5 mode) , this wraps the same value
     /// type the same way, so it crosses the boundary identically.
-    private struct DayScan {
+    // #1005-WARM: `internal`, not `private`, so `DayScanCacheStore` in its own file can project it to
+    // and from the on-disk form. Still engine-owned — nothing outside `Strand/Data` constructs one.
+    struct DayScan {
         let result: AnalyticsEngine.DayResult
         let rhrLine: String?
         /// #1331 respiratory diagnostic line (see `respRateLogLine`); replayed with `rhrLine`.
@@ -824,8 +826,27 @@ final class IntelligenceEngine: ObservableObject {
             ("useMotionAwareWake", "\(useMotionAwareWakeGlobal)"),
             ("deepHrvWindow", "\(deepHrvWindow)"),
             ("spo2CandidateDisplay", "\(spo2CandidateDisplayOn)"),
+            // #1005-WARM: the three Test Centre trace gates. NOT scoring inputs — they decide whether a
+            // scan CARRIES trace lines, and #1575 made a cache HIT replay all three arrays. With the cache
+            // now surviving relaunch, omitting them would let a scan captured while the Sleep trace was on
+            // keep replaying sleep-trace lines into a log where the trace is off — the same class of bug
+            // `hrvWindowDetail` closes for the midnight rollover, but reachable across launches. Folding
+            // them costs ONE cache drop on a toggle, which is exactly what #1575 intended (it removed the
+            // PERMANENT disable, not a one-time invalidation), and traces are rare.
+            ("sleepTraceActive", "\(sleepTraceActive)"),
+            ("hrvTraceActive", "\(hrvTraceActive)"),
+            ("stepsTraceActive", "\(stepsTraceActive)"),
         ]
         let dayCacheConfigSig = dayCacheConfigParts.map(\.value).joined(separator: "|")
+        // #1005-WARM: a cold PROCESS starts with an empty in-memory cache and an empty signature, so the
+        // block below would drop a cache that has nothing in it and every night would re-read + re-score —
+        // measured at 2403 s for 9 nights, backgrounded, on 2026-08-27. Load last launch's scans first.
+        // Only on a genuinely cold process: mid-process the in-memory cache is authoritative and newer.
+        if dayScanCacheConfigSig.isEmpty, dayScanCache.isEmpty, let env = DayScanCacheStore.load() {
+            dayScanCache = env.entries.mapValues { (key: $0.key, scan: $0.scan.toScan()) }
+            dayScanCacheConfigSig = env.configSig
+            diagnosticSink?("analyzeRecent dayCache LOADED \(dayScanCache.count) day(s) from disk", nil)
+        }
         // Drop the whole cache on a config change, then snapshot it into a Sendable `let` for the detached
         // loop (the engine is @MainActor; the loop can't touch `self`). The loop returns the updated cache
         // and we write it back after `.value`.
@@ -838,9 +859,10 @@ final class IntelligenceEngine: ObservableObject {
             // was already proven false once for `baselines1` (#1402), and the 2026-08-26 device log shows a
             // second full cold pass following every launch pass, so the claim is under suspicion again.
             // NAMES ONLY, never values — a signature component can carry profile data (age, sex).
-            // The previous signature is empty on the first pass of a process (the in-memory cache starts
-            // cold by construction), which is not a "change" worth attributing — say so instead of listing
-            // all 14 components.
+            // The previous signature is empty only when nothing was loaded from disk either (#1005-WARM
+            // restores it on a cold process), which is not a "change" worth attributing — say so instead
+            // of listing every component. A LOADED line followed by `sig changed:` is the informative
+            // case: last launch's cache was found but the config moved since.
             if dayScanCacheConfigSig.isEmpty {
                 diagnosticSink?("analyzeRecent dayCache DROPPED — cold process (no previous signature)", nil)
             } else {
@@ -1468,6 +1490,17 @@ final class IntelligenceEngine: ObservableObject {
         // #1005: write the loop's updated reuse cache back to the (main-actor) stored property. The pass ran
         // to completion above (`.value` awaited), so there is no concurrent access.
         dayScanCache = updatedDayScanCache
+        // #1005-WARM: and persist it, so the NEXT launch's first pass starts warm instead of re-scoring
+        // every night. Once per pass, never per day. A failed write costs a cold pass next launch and
+        // nothing else — but it is logged, because a cache that silently stopped persisting would look
+        // exactly like the bug this closes.
+        if !DayScanCacheStore.save(configSig: dayCacheConfigSig,
+                                   entries: dayScanCache.mapValues {
+                                       DayScanCacheStore.Entry(key: $0.key,
+                                                               scan: DayScanCacheStore.Scan($0.scan))
+                                   }) {
+            diagnosticSink?("analyzeRecent dayCache PERSIST FAILED — next launch will run cold", nil)
+        }
 
         // #714: replay each skipped day's diagnostic now that we're back on the main actor (diagnosticSink
         // is MainActor-bound). Always-on , not gated behind a test mode, mirroring the Kotlin `diag` sink.
@@ -2272,6 +2305,15 @@ final class IntelligenceEngine: ObservableObject {
         if !healDropped.isEmpty {
             diagnosticSink?("Dedup(#899): removed \(healDropped.count) overlapping duplicate sleep "
                 + "session(s) re-banked under a shifted strap timebase; re-scoring the affected days.", nil)
+            // #1005-WARM: the heal just DELETED banked sleep rows. Those rows reach a future pass only
+            // through `bandSleepStateSamples` — a PASS 1 read that is NOT in the per-day cache key — so
+            // the re-arm below would re-run a pass that cheerfully reuses the very days the heal
+            // invalidated. Until the cache persisted, this healed by accident on the next launch; now it
+            // has to be explicit. Dropped wholesale: a heal is rare and user-invisible, so the cost of
+            // over-dropping is one cold pass and the cost of under-dropping is a stale score.
+            dayScanCache.removeAll()
+            dayScanCacheConfigSig = ""
+            DayScanCacheStore.clear()
             // Re-score against the cleaned store via the existing #899-A re-arm: the days scored THIS
             // pass consumed the read-side deduped view, but that view had no bank-recency witness (the
             // fresh detections weren't banked yet), so its survivor can differ from the heal's. One

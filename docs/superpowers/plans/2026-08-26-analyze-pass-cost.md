@@ -492,6 +492,73 @@ trigger drops the file. All in `Packages/StrandAnalytics` or `StrandTests` — n
 
 ---
 
+### Commit 3 as BUILT (2026-08-27) — the plan's shape (A) was refuted; shipped shape (C)
+
+The plan recommended **(A) rebuild each night's scan from banked state, persisting only the cache key**,
+and left one question open: *"whether every field the cached scan supplies can in fact be reconstructed
+from banked state."* It cannot. Audited before writing:
+
+- **`nightlySkinTempC` is fatal to (A).** The fold reads it (`:1503`, `:1532`) and **nothing banks the raw
+  °C mean** — only the baseline-relative, 2-dp-rounded `skinTempDevC`, which is `nil` outright when the
+  skin-temp baseline is not yet usable. Not invertible.
+- **`workouts` is lossy into the bank.** `WorkoutRow` drops `zoneTimePct` (written `nil`), `avgHRRPct`,
+  `hrmax`, `hrmaxSource`, `caloriesKJ`, and narrows `avgHR` to `Int`. Bouts overlapping a real/manual
+  workout are `continue`d and **never banked at all**.
+- **`daily` is partial.** The row banked under `computedId` is not `res.daily`: `recovery` and
+  `skinTempDevC` are overwritten by pass-2 recomputes, and on an edited day five sleep fields are
+  `sleepEditedDaily`'s non-invertible output.
+
+**Shape (C), shipped instead: persist the projection pass 2 actually consumes.** A cached scan has exactly
+one consumer — on a hit, pass 1 does `out.append(cached.scan); continue` (`:983-985`) and performs no read,
+no score, no side effect. Pass 2 reads all 13 `DayScan` fields but only **7 of `DayResult`'s 15**. The
+other eight are read only *inside* pass 1 before the scan is cached, and pass 2 recomputes its own from
+`baselines2` regardless. Restoring them at `DayResult`'s own defaults reproduces what a cache hit hands
+pass 2 today, byte for byte.
+
+This is smaller than **(B)** as well: the new `Codable` surface is **two** types (`ExerciseSession`,
+`PrimarySessionRestingHR.Coverage`), not the nine a wholesale `DayScan` encoding needed.
+
+**Two things the plan got wrong about invalidation, corrected here.**
+
+1. **The `.dataChange` cache-drop seam does not exist.** The plan said *"`.dataChange` drops the persisted
+   cache. That is one line."* It is not: `dayScanCache.removeAll()` appears exactly once (`:854`), gated on
+   the signature alone, and `AnalyzePolicy.decide` is a pure rate-limiter that never touches the cache.
+2. **The plan's risk list is mostly inverted.** Manual sleep edits and dismissed sleep spans need **no**
+   invalidation — both are applied in PASS 2 (`sleepEditedDaily` `:1701-1703`; `dismissedSleepWindows`
+   `:2186`), fresh every pass, *after* the cache, so a reused scan never carried them. A registry owner
+   change is already in the per-day key.
+
+**The one real hole, which the plan missed: the #899 banked-sleep heal.** It deletes banked sleep rows in
+pass 2, and the effect reaches a later pass only through `bandSleepStateSamples` — a **pass-1 read that is
+not in the per-day key**. Its own re-arm (`pendingForcedRescore`) would re-run a pass that reuses the very
+days the heal invalidated. Until now this healed by accident on relaunch; persisting removes that bound.
+Handled at the delete site, not via a trigger — the heal raises no `analyzeRecent` call of its own.
+
+**Second hole, also not in the plan: trace toggles leaking across a launch.** `sleepTrace`/`stepsTrace`/
+`hrvTrace` are `[String]` populated only while a trace is on, and Commit 1b made a cache HIT replay all
+three. Persisted, a scan captured with the Sleep trace on would replay sleep-trace lines after the trace
+was switched off. The three trace-active booleans are now folded into the pass signature: one drop per
+toggle, which is what #1575 intended (it removed the *permanent* disable, not a one-time invalidation).
+
+**Storage:** `Application Support/noop-dayscan-cache.json`, version-tagged, `isExcludedFromBackup`. Not
+`UserDefaults` — the two session bands are on a 30 s grid (~960 entries per 8 h night), so this runs to
+hundreds of KB, and `UserDefaults` is read wholesale at launch. Not added to `BackupSettings.whitelist`,
+which is opt-in, so a restored `.noopbak` can never import another device's cache (precedent:
+`noop.analyzeWatermark`, `:2372`). Any decode failure or version mismatch reads as "no cache" — i.e. the
+cold pass we already have.
+
+**Expected effect, written down before the check:** pass 1 reuses 8 of 9 nights, so prep+score fall to
+roughly a ninth plus the fixed ~50-75 s fold — **~300 s instead of 2403 s** on a backgrounded morning. If
+it lands materially worse, the background penalty is scaling with something other than per-night work,
+and that is a different finding.
+
+**Kotlin twin: not written.** A device-local derived cache — no schema, no migration, no formula, no stored
+analytics result; it changes WHICH days recompute, never WHAT they compute to, so both platforms still
+produce identical scores. Android keeps the in-memory-only cache and repeats more work after a relaunch.
+Stated as a judgement call, not a rule, so it can be disagreed with.
+
+---
+
 ## Commit 4 — `perf(analyze): slide the night window instead of re-reading 54 h on a 24 h stride`
 
 **GATED on Commit 1 measuring `prep` ≫ `score`.** If `score` dominates, **do not build this** — say so
