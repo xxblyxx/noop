@@ -372,6 +372,11 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   (c3) **A Test Centre trace toggle drops the cache** rather than replaying stale trace lines from a
        persisted scan. Shares claim (b)'s blocker exactly — no trace has ever been active on this
        device — so (b) and (c3) should be checked in the SAME deliberate traced session.
+  **Read the FIRST pass after install correctly:** `LOADED` followed by `sig changed:` naming the three
+  sleep fields is CORRECT and costs one cold pass, once — Commit 2 changed how those components are
+  encoded, so a cache written by any earlier build has a different signature. It is not a Commit 2
+  failure. From the second launch onward, a healthy first pass reads `LOADED 9 day(s) from disk` with no
+  `DROPPED` line at all.
   The projection omits 8 of `DayResult`'s 15 fields on the evidence that pass 2 reads none of them
   (`testOmittedFieldsComeBackAtDayResultDefaults` pins the list). If any of those eight ever becomes
   load-bearing in the fold, this cache silently feeds it a default. That is the standing risk.

@@ -552,6 +552,24 @@ roughly a ninth plus the fixed ~50-75 s fold — **~300 s instead of 2403 s** on
 it lands materially worse, the background penalty is scaling with something other than per-night work,
 and that is a different finding.
 
+**Known and accepted (documented in the store, not silently left):** the envelope does not record the
+`maxDays` window it was produced under. A wide pass (#313 Effort rescore, #547 timestamp heal) persists
+extra days; the next ordinary pass loads them, prunes to its own window and writes the smaller set back.
+Recording the window would mean either refusing to load a narrower cache — making the COMMON case cold to
+protect the rare one — or keeping out-of-window days alive, which is unbounded growth. A missing entry only
+ever costs that day a normal cold score, never a wrong one.
+
+**Verified, not assumed, before shipping:** (1) the saved dictionary is POST-prune — the window filter at
+`:1463-1465` runs on the loop's copy, which is what is returned, assigned and then saved, so the file
+cannot grow unboundedly; (2) none of the eight omitted `DayResult` fields is read anywhere in pass 2 —
+including inside `selfHealEditedStages` and `dailyAggregateHonoringEdits`, the two edit-path bodies the
+audit had only read at their call sites. Every apparent hit is a `store.sleepSessions(...)` read or a
+`RecoveryScorer` recompute, never a read off a cached `DayResult`.
+
+**Expect `LOADED` followed by `sig changed:` on the FIRST pass after this install, naming the three sleep
+fields — that is correct, not a Commit 2 failure.** Commit 2 changed how those components are encoded, so
+any cache written by an earlier build has a different `configSig`. It costs exactly one cold pass, once.
+
 **Kotlin twin: not written.** A device-local derived cache — no schema, no migration, no formula, no stored
 analytics result; it changes WHICH days recompute, never WHAT they compute to, so both platforms still
 produce identical scores. Android keeps the in-memory-only cache and repeats more work after a relaunch.

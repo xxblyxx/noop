@@ -62,7 +62,20 @@ import WhoopStore
 enum DayScanCacheStore {
     /// Bump on ANY change to the encoded shape. A mismatch (or any decode failure) is treated as "no cache",
     /// which costs exactly the cold pass we have today — so getting this wrong degrades, never corrupts.
-    static let currentVersion = 2
+    static let currentVersion = 1
+
+    /// KNOWN AND ACCEPTED: the envelope does not record the `maxDays` window it was produced under.
+    /// `analyzeRecent` is usually called at the default window, but the #313 Effort rescore and the #547
+    /// timestamp heal pass a WIDER `maxDays`. A wide pass persists its extra days; the next ordinary pass
+    /// loads them, prunes to its own narrower window (`IntelligenceEngine.swift:1463-1465`, which runs on
+    /// the loop's copy and therefore on what gets saved), and writes the smaller set back. So a wide pass's
+    /// surplus days are dropped and re-scored if another wide pass runs.
+    ///
+    /// Left as-is deliberately: those callers are rare one-off migrations, a missing entry only ever costs
+    /// that day a normal cold score (never a wrong one), and recording the window would mean either
+    /// refusing to load a narrower cache — which would make the COMMON case cold to protect the rare one —
+    /// or keeping out-of-window days alive, which is unbounded growth. Revisit only if a wide pass becomes
+    /// routine.
 
     // MARK: - On-disk shape
 
