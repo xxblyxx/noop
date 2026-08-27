@@ -363,8 +363,22 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   (bumped from 2026-08-27, which is now answered for claim (a) checks 1–3. The entry stays OPEN for
   claim (b) — still entirely unobserved, still needing a deliberate traced session — and for check 4's
   warm half, which cannot be seen until Commit 2 lands. Do not settle this entry on the easy half.
-  After Commit 2 the falsifiable prediction is: a morning's second pass reads `reused=9/9` and lands
-  near 75 s.)
+  After Commit 2 (`de041d22`, installed —) the falsifiable prediction is: a morning's **second** pass
+  reads `reused=9/9` and lands near 75 s.
+  **Three ways that check can be misread, settled here in advance:**
+  1. **Pass 1 will still be cold, and that is not a failure.** `dayScanCacheConfigSig` starts `""`, so
+     the first pass of every process drops the cache by construction. That is Commit 3's job, not
+     Commit 2's. Only the SECOND pass tests the quantization.
+  2. **No second pass at all = no signal, not a refutation.** Today's second pass existed only because
+     a `postOffload` was floored and a later `idle-tick` fired. If the cadence produces one pass, the
+     log is quiet on this question — re-check another morning rather than concluding anything.
+  3. **A `sig changed:` still naming `sleepConsistency` / `habitualMidsleepSec` may be the `nil` →
+     value transition, not quantization failing.** Both are `nil` under `habitualMinDays` of history,
+     and this store is right at that edge (9 nights with data, 12 empty slots), so a night crossing the
+     threshold legitimately drops the cache once. Correct behaviour, covered by tests. Distinguish it
+     by whether the store just gained a night, before blaming the quanta.
+  If the quanta genuinely prove too fine, the fix is a coarser quantum or a hysteresis band — the
+  known boundary limitation is pinned by `testMidsleepStillInvalidatesAcrossAStepBoundary`.)
 
 ## Settled
 
