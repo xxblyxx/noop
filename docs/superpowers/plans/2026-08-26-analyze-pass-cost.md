@@ -147,10 +147,27 @@ of both is the signature of a **whole-task slowdown**, not of lock contention.
   discriminate: 18 minutes near-idle is ample to return to `.nominal`, and a 4-minute pass never
   reaches the throttled regime.
 
-**Discriminator (one small commit, one morning):** log `ProcessInfo.processInfo.thermalState` *and*
-foreground/background state at pass start, every Nth day inside the loop, and at pass end. Thermal
-escalating alongside per-day cost → Commit 5. State flipping to background at pass start with cost
-flat → the fix is scheduling, not thermal. This gates **Commit 5 only**; it blocks neither 2 nor 3.
+**RESOLVED the same day, by the owner: the app WAS backgrounded.** Asked what they did with the phone
+around 08:16, the owner answered: *"i opened and then switched to another app."* That is primary
+testimony, not inference, and it matches the log exactly — `.foreground` (scenePhase `.active`) fires at
+08:17:32 and then not again until 08:56:05, and no `HR notify` line appears in the whole 40-minute pass.
+So the 2403 s pass ran in the background and the 255 s pass ran in the foreground.
+
+**Consequences, which outlive this plan:**
+1. **The owner's original proposal is contradicted by their own device.** The opening request was to
+   "put it in the background … engage iPhone's efficiency processor". Backgrounding is where this pass
+   is **9.4× slower**. `Task.detached(priority: .utility)` already biases to the E-cores; that is
+   plausibly part of *why* it is slow, not a remedy still to be applied.
+2. **Thermal is no longer needed to explain the 9× gap**, so Commit 5 loses its main motivation. It is
+   not refuted — 40 minutes of sustained compute will still heat a phone, and thermal deferral is
+   independently sensible — but it is no longer the leading explanation and should not be built as if
+   it were. Do not re-derive "it might be thermal" from the numbers alone; this line is the answer.
+3. **The remedy is to do less work, not to relocate it.** That is Commit 3, which is why Commit 3 was
+   built next.
+
+**Still worth instrumenting eventually** (`thermalState` + foreground/background at pass start, every
+Nth day, and at pass end) — but as confirmation of a settled answer and to size the thermal term, not
+as a discriminator between two live hypotheses. Gates **Commit 5 only**; blocks neither 2 nor 3.
 
 **A floor nobody had named.** total − (prep + score) is ~50 s (pass 1) and ~75 s (pass 2) — roughly
 constant, and it is the pass-2 main-actor fold plus banking. **A perfect day cache leaves a ~1-minute
