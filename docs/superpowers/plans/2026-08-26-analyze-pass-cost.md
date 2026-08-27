@@ -104,6 +104,66 @@ page-cache state. Upstream built the `prep`/`score` split (#1559) for exactly th
 maintainer stated the rule: *"`prep` ≫ `score` → build the sliding window … `score` ≫ `prep` →
 narrowing windows is a dead end."* We do not have that line. Commit 1 ports it.
 
+### Measured evidence — 2026-08-27, the canonical morning, on the Commit 1 + 1b build
+
+Device log pulled 09:28 (352 live lines, 08:16:04 → 09:27:18 — the whole morning, nothing rolled).
+Two completed passes, **both fully cold**:
+
+| # | start | end | trigger | dayCache | prep | score | total |
+|---|---|---|---|---|---|---|---|
+| 1 | 08:16:06 | 08:56:05 | `idle-tick` | `DROPPED — cold process`; `reused=0/9 size=9 days=21 eligible=true ownerFamilyNil=0` | 1142.4 s | 1211.4 s | **2403.7 s (40 min)** |
+| 2 | 09:14:28 | 09:18:34 | `idle-tick` | `DROPPED — sig changed: sleepNeedHours,sleepConsistency`; `reused=0/9 size=9 …` | 97.6 s | 83.0 s | **255.5 s (4 min)** |
+
+Each pass is followed by `analyze: floored (trigger=postOffload, 1s since last pass, retry in 898s)` —
+the rescore floor is doing its job.
+
+**Commit 2's premise HOLDS — on the condition written down before the data existed.** The second
+pass's drop names `sleepNeedHours` and `sleepConsistency`, two of the three `computeHabitualSleep`-
+derived fields the plan predicted. `habitualMidsleepSec` did **not** move: it is an `Int` of seconds,
+i.e. already quantized — which is corroboration of the remedy, not a gap in it.
+
+**Commit 4 is REFUTED by its own gate.** prep/score is 0.94 (pass 1) and 1.18 (pass 2): neither term
+dominates. The gate said build the sliding window only on `prep` ≫ `score`. **Do not build it.**
+Upstream's 60–84 %-reads prior does not transfer to this device — that is now measured, not assumed.
+
+**The 9× per-night gap is now bounded, and it is not read volume.** Pass 2 is 255.5 s for 9 nights =
+28 s/night; pass 1 is 267 s/night. Same nights, same cold cache, same code — **9.4× apart**.
+
+**It is not store contention either, and the log settles that without another morning.** Three ways:
+(a) almost nothing was *written* during pass 1 — every sync in those 40 minutes reads `banked no
+sensor history` / `0 sensor rows persisted`; (b) pass 2 *did* persist 274 rows mid-pass (09:16:10) and
+stayed fast; (c) decisively, `prep` and `score` inflated by nearly the same factor (11.7× and 14.6×),
+and `score` brackets only `AnalyticsEngine.analyzeDay`, which never touches the store. Equal inflation
+of both is the signature of a **whole-task slowdown**, not of lock contention.
+
+**Two candidates remain, and this log cannot separate them.** Do not assert either.
+- *App state.* There is not one `HR notify` line in pass 1's 40 minutes; they begin 09:13:57 and run
+  every ~30 s through pass 2. `.foreground` (scenePhase `.active`, per `BackfillPolicy.swift:8`) fires
+  at 08:17:32 and then not again until 08:56:05 — a 38.5-minute gap covering the bulk of pass 1.
+  Consistent with the phone being locked/pocketed, where a `Task.detached(priority: .utility)` gets
+  very little CPU. Would also explain 775 s (08-26) vs 2403 s (08-27) as differing background time.
+- *Thermal.* 40 minutes of sustained compute self-heats into a progressive throttle, which is equally
+  a runaway. The tempting counter-argument — "pass 2 ran 18 min later and was fast" — does **not**
+  discriminate: 18 minutes near-idle is ample to return to `.nominal`, and a 4-minute pass never
+  reaches the throttled regime.
+
+**Discriminator (one small commit, one morning):** log `ProcessInfo.processInfo.thermalState` *and*
+foreground/background state at pass start, every Nth day inside the loop, and at pass end. Thermal
+escalating alongside per-day cost → Commit 5. State flipping to background at pass start with cost
+flat → the fix is scheduling, not thermal. This gates **Commit 5 only**; it blocks neither 2 nor 3.
+
+**A floor nobody had named.** total − (prep + score) is ~50 s (pass 1) and ~75 s (pass 2) — roughly
+constant, and it is the pass-2 main-actor fold plus banking. **A perfect day cache leaves a ~1-minute
+pass.** 40 min → ~1 min is a good outcome; recorded here so a later session does not chase the per-day
+loop expecting zero.
+
+**Falsifiable prediction to check after Commit 2:** the second pass of a morning should read
+`reused=9/9` and land near 75 s. That is what tells us the quantization worked.
+
+**Note on the denominator.** `reused=0/9 … days=21` is the honest form Commit 1 shipped: 12 of the 21
+slots log `sleep day=… SKIPPED hrSamples=0`, so 9 is the real number of days with data. The old
+`0/21` shape is what cost the 2026-08-26 investigation a wrong turn.
+
 ### Where this fork sits against upstream
 
 Fork `MARKETING_VERSION` **10.1.1**; upstream `ryanbr/noop` is at **10.6.0**. Three upstream changes in

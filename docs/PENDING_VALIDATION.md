@@ -332,10 +332,39 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   content and ordering to a freshly-scored night), and across local midnight exactly ONE day
   re-scores rather than the whole window. A reused night emitting FEWER trace lines than a fresh one is
   the failure this claim exists to catch, and it would mean the gate should not have been flipped.
-- check-after: 2026-08-27
-  (the first full morning after install. Claim (b) has no natural date — it needs a deliberate traced
-  session and will almost certainly outlive this `check-after`; when claim (a) settles, keep the entry
-  Open for (b) and bump rather than settling the whole entry on the easy half.)
+- result (2026-08-27, log pulled 09:28, 352 lines covering 08:16:04 → 09:27:18):
+  **Claim (a): checks 1–3 PASS; check 4 is HALF-observed, so (a) is not settled.**
+  1. `analyzeRecent cost` = 2, `re-score: done` = 2. ✅
+  2. `reused=0/9 size=9 days=21 eligible=true ownerFamilyNil=0` — M=9, the real count of days with
+     data (12 slots log `SKIPPED hrSamples=0`), not a flat 21. ✅ The lines are decisive: `eligible=`
+     and `ownerFamilyNil=` positively rule out per-day eligibility, which is exactly the ambiguity the
+     2026-08-26 investigation had to argue rather than read.
+  3. First `DROPPED` reads `cold process (no previous signature)`. ✅
+  4. Cold pass has both `prep` and `score` non-zero. ✅ **"Both ~0 on a fully-warm pass" remains
+     UNOBSERVED** — both of this morning's passes were cold (`reused=0/9`), because the very defect
+     Commit 2 targets fired between them. It will be observable only after Commit 2 lands.
+  **The decisive line: `analyzeRecent dayCache DROPPED — sig changed: sleepNeedHours,sleepConsistency`.**
+  Commit 2's premise HOLDS on the pre-committed condition. `habitualMidsleepSec` did not move (it is an
+  `Int` of seconds — already quantized), which corroborates the remedy.
+  **Commit 4 is REFUTED by its own gate** — prep/score = 0.94 and 1.18, neither term dominant. Do not
+  build the sliding window; upstream's 60–84%-reads prior does not transfer to this device.
+  **New, unplanned finding — the dominant cost is not the cache at all.** Two cold passes, same 9
+  nights, same code: 2403.7 s (08:16–08:56) vs 255.5 s (09:14–09:18) — **9.4× apart**. Store contention
+  is ruled out from this same log (`prep` and `score` inflated by nearly equal factors, 11.7× and
+  14.6×, and `score` brackets only `AnalyticsEngine.analyzeDay`, which never touches the store).
+  Two candidates remain and this log cannot separate them: app being backgrounded (no `HR notify` line
+  in pass 1's 40 minutes; `.foreground` fires 08:17:32 then not until 08:56:05) vs progressive thermal
+  throttling over 40 minutes of sustained compute. **Neither is asserted.** See the plan's 2026-08-27
+  section for the discriminator (log `thermalState` + foreground/background at pass start, per-N-days,
+  and pass end). That discriminator gates Commit 5 only.
+  **Floor worth knowing:** total − (prep+score) ≈ 50–75 s and roughly constant — the pass-2 fold plus
+  banking. A perfect day cache leaves a ~1-minute pass, not a zero-cost one.
+- check-after: 2026-09-03
+  (bumped from 2026-08-27, which is now answered for claim (a) checks 1–3. The entry stays OPEN for
+  claim (b) — still entirely unobserved, still needing a deliberate traced session — and for check 4's
+  warm half, which cannot be seen until Commit 2 lands. Do not settle this entry on the easy half.
+  After Commit 2 the falsifiable prediction is: a morning's second pass reads `reused=9/9` and lands
+  near 75 s.)
 
 ## Settled
 
