@@ -359,7 +359,9 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   and pass end). That discriminator gates Commit 5 only.
   **Floor worth knowing:** total − (prep+score) ≈ 50–75 s and roughly constant — the pass-2 fold plus
   banking. A perfect day cache leaves a ~1-minute pass, not a zero-cost one.
-- claim (c) — Commit 3, the persisted day-scan cache (`Strand/Data/DayScanCacheStore.swift`): the
+- claim (c) — Commit 3, the persisted day-scan cache (`Strand/Data/DayScanCacheStore.swift`;
+  `f89aad7e` + `0b1abf23`, built and installed to device `819D37A3` 2026-08-27 10:22, so the first
+  morning that can test it is 2026-08-28): the
   on-disk projection is COMPLETE for everything pass 2 reads, and the two invalidation holes closed
   with it actually hold on a real device. Three sub-claims, none observed on hardware:
   (c1) A relaunch reuses nights rather than re-scoring them — the whole point, and the only one a
