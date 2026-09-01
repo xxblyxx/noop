@@ -80,6 +80,14 @@ final class IntelligenceEngine: ObservableObject {
     /// never crosses `.noopbak`. The engine is a single long-lived instance (AppModel), so this survives the
     /// storm's back-to-back passes the drain is made of. See `AnalyzeRecentDayCache` (StrandAnalytics).
     private var dayScanCache: [String: (key: String, scan: DayScan)] = [:]
+    /// #1005-COST: the NEGATIVE half of the reuse cache — a day whose raw HR fell under the `hr.count >= 200`
+    /// scoring floor (`sleep day=… SKIPPED hrSamples=…`). Before this, a day taking that skip re-paid its
+    /// `hrSamples` read on EVERY pass forever (a stream read with no `dayScanCache` entry to short-circuit
+    /// it), unlike a scored day. Keyed and invalidated the SAME way as `dayScanCache` (the per-day
+    /// `AnalyzeRecentDayCache.cacheKey`, built from the raw `hrFingerprint`) — new HR rows landing move the
+    /// key and the negative verdict stops applying automatically. Carries only the `hrCount` the miss
+    /// observed, so a hit can replay the identical `SKIPPED hrSamples=N` diagnostic line without re-reading.
+    private var daySkipCache: [String: (key: String, hrCount: Int)] = [:]
     /// The scoring-config signature the `dayScanCache` entries were produced under (profile / baselines1 /
     /// tz / sleep need+consistency / habitual midsleep / stager toggles). Those feed `analyzeDay` but are
     /// pass-global, not in the per-day key, so when the current pass's signature differs every cached scan is
@@ -860,8 +868,10 @@ final class IntelligenceEngine: ObservableObject {
         // Only on a genuinely cold process: mid-process the in-memory cache is authoritative and newer.
         if dayScanCacheConfigSig.isEmpty, dayScanCache.isEmpty, let env = DayScanCacheStore.load() {
             dayScanCache = env.entries.mapValues { (key: $0.key, scan: $0.scan.toScan()) }
+            daySkipCache = env.skipEntries.mapValues { (key: $0.key, hrCount: $0.hrCount) }
             dayScanCacheConfigSig = env.configSig
-            diagnosticSink?("analyzeRecent dayCache LOADED \(dayScanCache.count) day(s) from disk", nil)
+            diagnosticSink?("analyzeRecent dayCache LOADED \(dayScanCache.count) day(s) "
+                            + "(+\(daySkipCache.count) skip) from disk", nil)
         }
         // Drop the whole cache on a config change, then snapshot it into a Sendable `let` for the detached
         // loop (the engine is @MainActor; the loop can't touch `self`). The loop returns the updated cache
@@ -890,9 +900,11 @@ final class IntelligenceEngine: ObservableObject {
                                 + (moved.isEmpty ? "?" : moved.joined(separator: ",")), nil)
             }
             dayScanCache.removeAll()
+            daySkipCache.removeAll()
             dayScanCacheConfigSig = dayCacheConfigSig
         }
         let inDayScanCache = dayScanCache
+        let inDaySkipCache = daySkipCache
 
         // #1005-STORM (review finding #5): bound to a local `let` and wrapped in
         // `withTaskCancellationHandler` so cancelling the outer `analyzeRecent` Task (e.g. a
@@ -901,12 +913,12 @@ final class IntelligenceEngine: ObservableObject {
         // running to completion uncoordinated with the caller's cancellation, even after
         // `SyncAnalyzeBackgroundScheduler`'s `expirationHandler` had already reported the task done to
         // iOS. The loop below checks `Task.isCancelled` per day and `break`s early rather than
-        // `throw`ing, so the closure's own signature doesn't need to change. This is the dominant-cost
-        // detached task (the per-day scoring loop this whole investigation measured at ~48s/pass) and
-        // the one this fix targets; a smaller, separate `Task.detached` further down (steps-calibration)
-        // is NOT touched here — same reasoning as the plan's scope note: cancellation-checking every
-        // per-day computation in this file is a larger change than this finding calls for.
-        let scanTask = Task.detached(priority: .utility) { () -> ([DayScan], [String], [String: (key: String, scan: DayScan)], Bool) in
+        // `throw`ing. This is the dominant-cost detached task (the per-day scoring loop this whole
+        // investigation measured at ~48s/pass) and the one this fix targets; a smaller, separate
+        // `Task.detached` further down (steps-calibration) is NOT touched here — same reasoning as the
+        // plan's scope note: cancellation-checking every per-day computation in this file is a larger
+        // change than this finding calls for.
+        let scanTask = Task.detached(priority: .utility) { () -> ([DayScan], [String], [String: (key: String, scan: DayScan)], [String: (key: String, hrCount: Int)], Bool) in
             var out: [DayScan] = []
             // Days skipped below (too few HR samples) never get a DayScan, so this diagnostic can't ride
             // along on one; carried out alongside `out` and replayed through `diagnosticSink` on the main
@@ -923,6 +935,9 @@ final class IntelligenceEngine: ObservableObject {
             // diagnostic carried on `skippedDayLines`.
             var dayScanCacheLocal = inDayScanCache
             var dayCacheReused = 0
+            // #1005-COST: the negative half — see `daySkipCache`'s doc. Snapshotted/returned the same way.
+            var daySkipCacheLocal = inDaySkipCache
+            var daySkipCacheReused = 0
             // #1005-COST (port of upstream #1559): per-phase cost tally. `prep` brackets the windowed store
             // reads plus the session matching that sits between them and `analyzeDay`; `score` brackets
             // `analyzeDay` itself. The pass has only ever timed itself END TO END, so whether the measured
@@ -1022,12 +1037,22 @@ final class IntelligenceEngine: ObservableObject {
                             dayCacheReused += 1
                             continue
                         }
+                        // #1005-COST: the NEGATIVE half. A day this pass already knows scored too few HR
+                        // rows last time (same key ⇒ no new HR data landed) skips straight to replaying that
+                        // verdict — no `hrSamples` read at all, unlike a positive miss which still has to pay
+                        // for the read below. See `daySkipCache`'s doc for why the same `fp`-derived key is
+                        // a safe witness for both halves.
+                        if let skip = daySkipCacheLocal[day], skip.key == key {
+                            skippedDayLines.append("sleep day=\(day) SKIPPED hrSamples=\(skip.hrCount) (need ≥200)")
+                            daySkipCacheReused += 1
+                            continue
+                        }
                     }
                 }
 
-                // #1005-COST: the READ+PREP phase starts here. Deliberately AFTER the reuse `continue`
-                // above, so a cache hit contributes nothing to either tally — a hit's whole point is that it
-                // performs neither phase.
+                // #1005-COST: the READ+PREP phase starts here. Deliberately AFTER the reuse `continue`s
+                // above, so a cache hit (positive or negative) contributes nothing to either tally — a hit's
+                // whole point is that it performs neither phase.
                 let tPrep0 = Date()
                 let hr = (try? await store.hrSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
                 guard hr.count >= 200 else {
@@ -1037,6 +1062,14 @@ final class IntelligenceEngine: ObservableObject {
                     // hide a real and recurring share of the cost.
                     dayPrepSeconds += Date().timeIntervalSince(tPrep0)
                     skippedDayLines.append("sleep day=\(day) SKIPPED hrSamples=\(hr.count) (need ≥200)")
+                    // #1005-COST: bank the negative verdict so the NEXT pass can skip this read entirely,
+                    // same as a positive scan does for `analyzeDay`. Only when this day was cache-eligible
+                    // this pass (`dayCacheKey` set) — an ineligible day (unregistered owner, no fingerprint)
+                    // never gets a key to invalidate correctly against, so it stays uncached, matching the
+                    // positive cache's own eligibility gate.
+                    if let key = dayCacheKey {
+                        daySkipCacheLocal[day] = (key: key, hrCount: hr.count)
+                    }
                     continue
                 }
                 let rr = (try? await store.rrIntervals(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
@@ -1471,6 +1504,10 @@ final class IntelligenceEngine: ObservableObject {
                 if let key = dayCacheKey {
                     dayScanCacheLocal[day] = (key: key, scan: scan)
                     dayCacheCacheable += 1
+                    // This day previously took the negative path (SKIPPED) and now scores — drop its stale
+                    // skip entry rather than leaving it to age out of the window filter below unused. Not
+                    // load-bearing (a stale entry's `key` no longer matches and would just miss), tidiness.
+                    daySkipCacheLocal.removeValue(forKey: day)
                 }
                 out.append(scan)
             }
@@ -1479,6 +1516,7 @@ final class IntelligenceEngine: ObservableObject {
             let dayCacheWindow = Set((0..<maxDays).map {
                 AnalyticsEngine.dayString(nowLocalMidnight - $0 * 86_400, offsetSec: tzOffset) })
             dayScanCacheLocal = dayScanCacheLocal.filter { dayCacheWindow.contains($0.key) }
+            daySkipCacheLocal = daySkipCacheLocal.filter { dayCacheWindow.contains($0.key) }
             // #1005-COST: the denominator is now `reused + cacheable` — the days that COULD have been
             // reused — not `maxDays`, which counts loop iterations including day slots that hold no data.
             // `days=` keeps the window size visible so the two are never confused again. `eligible` and
@@ -1487,7 +1525,12 @@ final class IntelligenceEngine: ObservableObject {
             skippedDayLines.append("analyzeRecent dayCache reused=\(dayCacheReused)/"
                                    + "\(dayCacheReused + dayCacheCacheable) "
                                    + "size=\(dayScanCacheLocal.count) days=\(maxDays) "
-                                   + "eligible=\(dayCacheEligible) ownerFamilyNil=\(dayOwnerFamilyNil)")
+                                   + "eligible=\(dayCacheEligible) ownerFamilyNil=\(dayOwnerFamilyNil) "
+                                   // #1005-COST: a NEGATIVE hit (a re-read this pass skipped entirely) kept
+                                   // SEPARATE from `reused=` above — that count already means "avoided
+                                   // analyzeDay", and folding in "avoided one hrSamples read" would silently
+                                   // change what a historical `reused=N/M` log line means.
+                                   + "skipHits=\(daySkipCacheReused) skipSize=\(daySkipCacheLocal.count)")
             // #1005-COST: where the pass actually goes. `prep` is the windowed store reads plus the session
             // matching between them; `score` is `analyzeDay`. The two do NOT sum to the pass total — pass 2,
             // the baseline folds and the reconciliation all sit outside this loop — so read them as a RATIO,
@@ -1500,9 +1543,10 @@ final class IntelligenceEngine: ObservableObject {
             // window reconcile (stale-day eviction, provenance wide-delete) MUST NOT span the full
             // `maxDays` window when `out` covers only the newest days the loop reached — see
             // `ComputedScoreReconcilePolicy`.
-            return (out, skippedDayLines, dayScanCacheLocal, Task.isCancelled)
+            return (out, skippedDayLines, dayScanCacheLocal, daySkipCacheLocal, Task.isCancelled)
         }
-        let (scanned, skippedDayLines, updatedDayScanCache, passWasCancelled) = await withTaskCancellationHandler {
+        let (scanned, skippedDayLines, updatedDayScanCache, updatedDaySkipCache, passWasCancelled)
+            = await withTaskCancellationHandler {
             await scanTask.value
         } onCancel: {
             scanTask.cancel()
@@ -1510,6 +1554,7 @@ final class IntelligenceEngine: ObservableObject {
         // #1005: write the loop's updated reuse cache back to the (main-actor) stored property. The pass ran
         // to completion above (`.value` awaited), so there is no concurrent access.
         dayScanCache = updatedDayScanCache
+        daySkipCache = updatedDaySkipCache
         // #1005-WARM: and persist it, so the NEXT launch's first pass starts warm instead of re-scoring
         // every night. Once per pass, never per day. A failed write costs a cold pass next launch and
         // nothing else — but it is logged, because a cache that silently stopped persisting would look
@@ -1518,6 +1563,9 @@ final class IntelligenceEngine: ObservableObject {
                                    entries: dayScanCache.mapValues {
                                        DayScanCacheStore.Entry(key: $0.key,
                                                                scan: DayScanCacheStore.Scan($0.scan))
+                                   },
+                                   skipEntries: daySkipCache.mapValues {
+                                       DayScanCacheStore.SkipEntry(key: $0.key, hrCount: $0.hrCount)
                                    }) {
             diagnosticSink?("analyzeRecent dayCache PERSIST FAILED — next launch will run cold", nil)
         }
@@ -2349,6 +2397,11 @@ final class IntelligenceEngine: ObservableObject {
             // has to be explicit. Dropped wholesale: a heal is rare and user-invisible, so the cost of
             // over-dropping is one cold pass and the cost of under-dropping is a stale score.
             dayScanCache.removeAll()
+            // The skip cache is unaffected by what THIS heal deletes (sleep rows, not HR rows — a day's
+            // `hr.count >= 200` verdict never moves), but it shares `DayScanCacheStore`'s one on-disk file
+            // with `dayScanCache`, so `DayScanCacheStore.clear()` below drops it too. Clear the in-memory
+            // half to match rather than let it silently diverge from what's on disk.
+            daySkipCache.removeAll()
             dayScanCacheConfigSig = ""
             DayScanCacheStore.clear()
             // Re-score against the cleaned store via the existing #899-A re-arm: the days scored THIS

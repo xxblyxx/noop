@@ -55,14 +55,24 @@ import WhoopStore
 /// Not in `BackupSettings.whitelist` — that list is opt-in, so a restored `.noopbak` can never import
 /// another device's scan cache. Same precedent as `noop.analyzeWatermark` (`IntelligenceEngine.swift:2372`).
 ///
-/// **No Kotlin twin.** This is a device-local derived cache: it holds no user data that is not already
-/// banked, feeds no formula, has no schema and no migration, and changes WHICH days recompute, never WHAT
-/// they compute to. Android keeps the in-memory-only cache; the two platforms produce identical scores and
-/// differ only in how much work a relaunch repeats.
+/// **No Kotlin twin — including for `skipEntries` (#1005-COST).** This is a device-local derived cache: it
+/// holds no user data that is not already banked, feeds no formula, has no schema and no migration, and
+/// changes WHICH days recompute, never WHAT they compute to; a negative (too-few-HR-samples) entry is the
+/// same argument again, one step earlier in the pipeline — it only ever skips a re-READ, never changes what
+/// the read would have found. Android keeps the in-memory-only cache (no negative half at all — an
+/// in-process `hrSamples` re-read on a rare SKIPPED day is not the cost this closes); the two platforms
+/// produce identical scores and differ only in how much work a relaunch repeats.
 enum DayScanCacheStore {
     /// Bump on ANY change to the encoded shape. A mismatch (or any decode failure) is treated as "no cache",
     /// which costs exactly the cold pass we have today — so getting this wrong degrades, never corrupts.
-    static let currentVersion = 1
+    ///
+    /// v2 (#1005-COST): added `Envelope.skipEntries` — the negative half of the cache (a day whose raw HR
+    /// fell under the scoring floor, so it can skip re-reading `hrSamples` next pass too, not just
+    /// re-scoring). A v1 on-disk file has no such key and, more directly, carries `version: 1` — the
+    /// `load()` version guard below rejects it outright, same as any other mismatch, costing exactly ONE
+    /// cold pass on the affected device the first time this ships. Degrades, never corrupts, per this
+    /// type's own policy.
+    static let currentVersion = 2
 
     /// KNOWN AND ACCEPTED: the envelope does not record the `maxDays` window it was produced under.
     /// `analyzeRecent` is usually called at the default window, but the #313 Effort rescore and the #547
@@ -86,11 +96,21 @@ enum DayScanCacheStore {
         /// this the first pass drops the cache it just loaded and the whole change does nothing.
         let configSig: String
         let entries: [String: Entry]
+        /// v2: the negative-cache entries — see `SkipEntry`.
+        let skipEntries: [String: SkipEntry]
     }
 
     struct Entry: Codable {
         let key: String
         let scan: Scan
+    }
+
+    /// A day that fell under `analyzeRecent`'s `hr.count >= 200` scoring floor, so the next pass can
+    /// replay `sleep day=… SKIPPED hrSamples=N` without re-reading the stream — see `daySkipCache`'s doc
+    /// on `IntelligenceEngine`. `key` invalidates it the same way `Entry.key` invalidates a positive scan.
+    struct SkipEntry: Codable {
+        let key: String
+        let hrCount: Int
     }
 
     /// The projection of `IntelligenceEngine.DayScan` that pass 2 actually consumes.
@@ -144,9 +164,11 @@ enum DayScanCacheStore {
     /// an error — but it IS reported to the diagnostic sink, because a cache that silently stops persisting
     /// would look exactly like the bug this change fixes.
     @discardableResult
-    static func save(configSig: String, entries: [String: Entry]) -> Bool {
+    static func save(configSig: String, entries: [String: Entry],
+                     skipEntries: [String: SkipEntry] = [:]) -> Bool {
         guard let url = fileURL else { return false }
-        let env = Envelope(version: currentVersion, configSig: configSig, entries: entries)
+        let env = Envelope(version: currentVersion, configSig: configSig, entries: entries,
+                           skipEntries: skipEntries)
         guard let data = try? JSONEncoder().encode(env) else { return false }
         do {
             try data.write(to: url, options: .atomic)

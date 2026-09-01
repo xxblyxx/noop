@@ -108,7 +108,8 @@ final class DayScanCacheStoreTests: XCTestCase {
     func testVersionMismatchIsRejected() throws {
         let env = DayScanCacheStore.Envelope(
             version: DayScanCacheStore.currentVersion + 1, configSig: "sig",
-            entries: ["2026-08-26": .init(key: "k", scan: DayScanCacheStore.Scan(scan()))])
+            entries: ["2026-08-26": .init(key: "k", scan: DayScanCacheStore.Scan(scan()))],
+            skipEntries: [:])
         let url = try XCTUnwrap(DayScanCacheStore.fileURL)
         defer { DayScanCacheStore.clear() }
         try JSONEncoder().encode(env).write(to: url, options: .atomic)
@@ -143,5 +144,28 @@ final class DayScanCacheStoreTests: XCTestCase {
         XCTAssertNotNil(DayScanCacheStore.load())
         DayScanCacheStore.clear()
         XCTAssertNil(DayScanCacheStore.load())
+    }
+
+    /// #1005-COST: the negative half (`skipEntries`) round-trips independently of `entries` — a day can be
+    /// cached as "too few HR samples" without ever having a positive scan.
+    func testSaveLoadRoundTripsSkipEntries() throws {
+        defer { DayScanCacheStore.clear() }
+        let skip = ["2026-08-27": DayScanCacheStore.SkipEntry(key: "owner|3:99:nil:s", hrCount: 3)]
+        XCTAssertTrue(DayScanCacheStore.save(configSig: "SIG-B", entries: [:], skipEntries: skip))
+        let loaded = try XCTUnwrap(DayScanCacheStore.load())
+        XCTAssertEqual(loaded.skipEntries.keys.sorted(), ["2026-08-27"])
+        XCTAssertEqual(loaded.skipEntries["2026-08-27"]?.key, "owner|3:99:nil:s")
+        XCTAssertEqual(loaded.skipEntries["2026-08-27"]?.hrCount, 3)
+    }
+
+    /// A caller that never mentions `skipEntries` (every call site before this feature, and the two
+    /// `save(configSig:entries:)` calls above) still round-trips a well-formed, empty skip map — not a
+    /// decode failure. Guards the default-parameter path specifically, since `testVersionMismatchIsRejected`
+    /// only proves a MISMATCHED version is rejected, not that a default-populated file loads cleanly.
+    func testDefaultSkipEntriesRoundTripsEmpty() throws {
+        defer { DayScanCacheStore.clear() }
+        XCTAssertTrue(DayScanCacheStore.save(configSig: "SIG-C", entries: [:]))
+        let loaded = try XCTUnwrap(DayScanCacheStore.load())
+        XCTAssertTrue(loaded.skipEntries.isEmpty)
     }
 }
