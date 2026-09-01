@@ -242,11 +242,38 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   than jumping straight to ~70%; it never sits stuck at a stale fraction after a disconnect/reconnect
   mid-sync; it never vanishes while a backfill is still genuinely running. Any of those failing is
   evidence the epoch guard, entry gating, or reentrancy fix has its own bug.
+- **2026-09-01 update: two more commits landed on `fix/analyze-pass-cost`, extending this entry with
+  two new claims rather than opening a parallel one (they'll be read from the same device log).**
+  Root cause of the 2026-09-01 report (wake time truncated to ~00:51, corrected only on foreground
+  open): the last analyze pass before noon ended at 00:53:55 over data ending 00:52:51 — `SleepStager`
+  honestly reported the last available sample as wake — and then no analyze pass ran for the next 12
+  hours despite other background work (a folder backup, the `.healthwriteback` BGTask) running fine in
+  that window. Two commits address the two halves:
+  - **claim (d) — `9e273316` (perf(analyze): stop the pass signature churning…):** on a morning with a
+    real sync, no `analyzeRecent dayCache DROPPED — sig changed: sleepConsistency` line, and `reused=`
+    reads near-total for nights unchanged since the previous pass. *Misread guard:* a drop naming only
+    `habitualMidsleepSec` is CORRECT and expected the first time `habitualMidsleepSec` moves from nil
+    to a value (cold-start crossing `habitualMinDays`) — do not read that alone as a regression.
+  - **claim (f) — `a102372f` (fix(analyze): never evict the computed window from a cancelled pass):**
+    a pass cut short by a `BGProcessingTask` expiration leaves the computed window intact rather than
+    deleting every day older than the ones it reached. Cannot be forced on demand; only observable if
+    `noop.analyze.bg.expireCount` (added in `c785e90d`) ever increments — until the background re-arm
+    fix (Commit 5, not yet shipped as of this edit) actually gets a pass running in a window that can
+    expire, this has essentially never had the chance to fire, which is exactly why the bug it fixes
+    survived undetected.
+  - **Flagged, not a claim:** the personalized sleep need + regularity (`IntelligenceEngine.swift:727`
+    area) are computed every pass and then discarded — they never reach a displayed number. If a future
+    change wires them into `Rest.composite(daily:)`'s `daily:` call sites, claim (d)'s conditional
+    signature fold must be revisited (see `9e273316`'s message and
+    `RestCompositeDailyDefaultsTests.swift`, which fails loudly if that happens).
+  A background-task re-arm fix (Commit 5 of the same plan) and its own overnight claim are expected to
+  land on this branch next; when they do, extend this entry again rather than opening a new one.
 - check-after: 2026-08-28
   (bumped from 2026-08-25 after the partial check recorded in `blocked-because`. What is still
   owed: the CPU/pass-count half re-measured once the follow-up floor fix lands; one eyes-on morning
   sync for the progress bar; and Commit 5's narrower disconnect-right-after-HISTORY_COMPLETE case.
-  The entry stays Open until all three are answered — the 2026-08-25 pull settles none of them.)
+  The entry stays Open until all three are answered — the 2026-08-25 pull settles none of them. Now
+  ALSO covers claims (d)/(f) above, due on the same first-real-morning-sync-after-install check.)
 
 ### The analyze-pass-cost diagnostics are readable on a real morning, and the #1575 port didn't break trace replay
 - id: analyze-pass-cost-instrumentation
