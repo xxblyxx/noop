@@ -276,6 +276,11 @@ interface WhoopDao : DeviceRegistryDao {
         // looked like data loss. In steady state `dailyMetrics` covers the window, so this guard never
         // fires and the write is byte-identical to before. (Twin of the Swift IntelligenceEngine
         // empty-window guard; the post-offload trigger is additionally gated on newData — see #1146.)
+        // #1005-STORM follow-up: the caller contracts `from` to the actually-scored span via
+        // `ComputedScoreReconcilePolicy.reconcileFromDay`, so a pass cut short mid-scan can no longer
+        // wide-delete days it never re-scored. That contraction is a no-op on Android today (a cancelled
+        // coroutine unwinds before reaching this call); the shared policy keeps the rule honest across
+        // platforms.
         if (dailyMetrics.isEmpty()) return
         deleteDailyMetricsInRange(deviceId, from, to)
         deleteScoreInputProvenanceInRange(deviceId, from, to)

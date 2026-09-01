@@ -890,7 +890,7 @@ final class IntelligenceEngine: ObservableObject {
         // the one this fix targets; a smaller, separate `Task.detached` further down (steps-calibration)
         // is NOT touched here — same reasoning as the plan's scope note: cancellation-checking every
         // per-day computation in this file is a larger change than this finding calls for.
-        let scanTask = Task.detached(priority: .utility) { () -> ([DayScan], [String], [String: (key: String, scan: DayScan)]) in
+        let scanTask = Task.detached(priority: .utility) { () -> ([DayScan], [String], [String: (key: String, scan: DayScan)], Bool) in
             var out: [DayScan] = []
             // Days skipped below (too few HR samples) never get a DayScan, so this diagnostic can't ride
             // along on one; carried out alongside `out` and replayed through `diagnosticSink` on the main
@@ -1480,9 +1480,13 @@ final class IntelligenceEngine: ObservableObject {
             // dominating means it is not, whatever the row counts look like.
             skippedDayLines.append("analyzeRecent cost prep=\(Int(dayPrepSeconds * 1000))ms "
                                    + "score=\(Int(dayScoreSeconds * 1000))ms")
-            return (out, skippedDayLines, dayScanCacheLocal)
+            // #1005-STORM follow-up: report whether the loop `break`ed early on cancellation. Pass 2's
+            // window reconcile (stale-day eviction, provenance wide-delete) MUST NOT span the full
+            // `maxDays` window when `out` covers only the newest days the loop reached — see
+            // `ComputedScoreReconcilePolicy`.
+            return (out, skippedDayLines, dayScanCacheLocal, Task.isCancelled)
         }
-        let (scanned, skippedDayLines, updatedDayScanCache) = await withTaskCancellationHandler {
+        let (scanned, skippedDayLines, updatedDayScanCache, passWasCancelled) = await withTaskCancellationHandler {
             await scanTask.value
         } onCancel: {
             scanTask.cancel()
@@ -1505,6 +1509,14 @@ final class IntelligenceEngine: ObservableObject {
         // #714: replay each skipped day's diagnostic now that we're back on the main actor (diagnosticSink
         // is MainActor-bound). Always-on , not gated behind a test mode, mirroring the Kotlin `diag` sink.
         for line in skippedDayLines { diagnosticSink?(line, nil) }
+        // #1005-STORM follow-up: make a truncated pass visible in the always-on log. This is the only
+        // way (short of `expireCount` in the bg-task telemetry) to know a `BGProcessingTask` expiration
+        // actually cut a pass short — and it is the condition under which the window reconcile above was
+        // deliberately contracted.
+        if passWasCancelled {
+            diagnosticSink?("analyzeRecent CANCELLED mid-scan — scored \(scanned.count) day(s); "
+                            + "window reconcile contracted to the scored span", nil)
+        }
 
         // CAPTURE-B (#814/#799): per-day resolved READ owner + that owner's HR-row count, keyed by day, so
         // the second pass (which has the provenance sets) can emit the universal `dayOwner …` line. The
@@ -2009,12 +2021,20 @@ final class IntelligenceEngine: ObservableObject {
             provenanceByCell["\(point.day)\u{1F}\(point.key)"] =
                 ScoreInputProvenanceRow(day: point.day, key: point.key, sourceId: source)
         }
+        // #1005-STORM follow-up: `persistComputedScores` wide-DELETEs provenance across [from, to] before
+        // re-inserting only the rows for the days this pass scored. On a pass cancelled mid-scan
+        // (`passWasCancelled`), `dailies` covers only the newest days the loop reached, so a full-window
+        // `from = oldestDay` would blank attribution for every older day the pass never re-scored.
+        // Contract `from` to the actually-scored span; a complete pass is `oldestDay` unchanged.
+        let reconcileFromDay = ComputedScoreReconcilePolicy.reconcileFromDay(
+            cancelled: passWasCancelled, scoredDays: dailies.map(\.day),
+            windowOldestDay: oldestDay, windowNewestDay: newestDay)
         try? await store.persistComputedScores(
             dailyMetrics: dailies,
             metricPoints: restPoints,
             provenance: Array(provenanceByCell.values),
             deviceId: computedId,
-            from: oldestDay,
+            from: reconcileFromDay,
             to: newestDay
         )
 
@@ -2025,11 +2045,12 @@ final class IntelligenceEngine: ObservableObject {
         // state (the new keys cover the window), so it adds nothing once the migration has settled.
         // #1196: skip stale-eviction on an EMPTY pass so a transient/degenerate empty `dailies` (a read
         // over a still-incomplete raw store during a reconnect/offload storm, or the active strap
-        // momentarily resolving to an empty id) never evicts the whole window. In steady state `dailies`
-        // covers the window, so eviction runs exactly as before; `persistComputedScores` is guarded the
-        // same way, so an empty pass leaves the persisted window untouched. Twin of the Android
-        // WhoopDao.replaceComputedScoreWindow empty guard.
-        if !dailies.isEmpty {
+        // momentarily resolving to an empty id) never evicts the whole window.
+        // #1005-STORM follow-up: skip it on a CANCELLED pass too — the `#1196` empty guard does not cover
+        // a pass that scored some newest days and was then cut short before reaching the older ones, whose
+        // rows would all read as "stale" against the truncated `freshKeys`. `persistComputedScores` above
+        // is contracted the same way. Twin of the Android WhoopDao.replaceComputedScoreWindow guard.
+        if ComputedScoreReconcilePolicy.mayEvictStaleDays(scoredDayCount: dailies.count, cancelled: passWasCancelled) {
             let freshKeys = Set(dailies.map { $0.day })
             let existingWindow = (try? await store.dailyMetrics(deviceId: computedId, from: oldestDay, to: newestDay)) ?? []
             for stale in existingWindow where !freshKeys.contains(stale.day) {

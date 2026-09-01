@@ -1506,9 +1506,20 @@ object IntelligenceEngine {
             provenanceByCell[point.day to point.key] =
                 ScoreInputProvenanceRow(computedId, point.day, point.key, source)
         }
+        // #1005-STORM follow-up: contract the destructive reconcile window to the days this pass
+        // actually scored. `cancelled = false` always on Android — a cancelled coroutine throws out of
+        // this function before reaching here, so `dailies` is never a truncated newest-days-only subset
+        // (the Swift twin `break`s its day loop and banks a partial `dailies`, and passes `cancelled =
+        // true` from that path). See `ComputedScoreReconcilePolicy`.
+        val reconcileFrom = ComputedScoreReconcilePolicy.reconcileFromDay(
+            cancelled = false,
+            scoredDays = dailies.map { it.day },
+            windowOldestDay = oldestDay,
+            windowNewestDay = newestDay,
+        )
         repo.replaceComputedScoreWindow(
             deviceId = computedId,
-            from = oldestDay,
+            from = reconcileFrom,
             to = newestDay,
             dailyMetrics = dailies,
             metricPoints = restRows,
