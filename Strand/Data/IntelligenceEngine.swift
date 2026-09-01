@@ -812,15 +812,31 @@ final class IntelligenceEngine: ObservableObject {
             ("profile.stepTicksPerStep", String(up.stepTicksPerStep.bitPattern)),
             ("maxHR", maxHR.map { String($0.bitPattern) } ?? "nil"),
             ("tzOffset", "\(tzOffset)"),
-            // #1005-CHURN: the three `computeHabitualSleep`-derived inputs are folded QUANTIZED, not by
-            // raw bit-pattern. All three are computed from the `-noop` sleep sessions a PREVIOUS pass
-            // banked, so folding them exactly made the pass feed its own output back into its own cache
-            // identity — measured 2026-08-27 as a second full cold pass on every launch, drop reason
-            // `sig changed: sleepNeedHours,sleepConsistency`, re-scoring 9 nights to byte-identical
-            // results. The quanta sit far below display resolution, so a REAL change still invalidates.
-            // Signature only — `analyzeDay` below still receives the full-precision values.
-            ("sleepNeedHours", AnalyzeRecentConfigSignature.sleepNeedHours(sleepNeedHours)),
-            ("sleepConsistency", AnalyzeRecentConfigSignature.sleepConsistency(sleepConsistency)),
+            // #1005-CHURN: `sleepNeedHours`/`sleepConsistency` are two of the three `computeHabitualSleep`-
+            // derived inputs, and unlike `habitualMidsleepSec` below they feed NOTHING pass 2 reads or the
+            // cache persists — `AnalyticsEngine.analyzeDay` consumes them only for `DayResult.restScore`
+            // (pass-1-only; `DayScanCacheStore` never persists it and pass 2 always recomputes Rest from
+            // `Rest.composite(daily:)` with its OWN defaults, never `DayResult.restScore`) and for the
+            // `.sleep` trace line. Quantizing them (the original #1005-CHURN fix, kept below for when the
+            // trace IS on) still dropped the whole cache on every pass with new sleep data — the value
+            // moves by more than any reasonable quantum when a night enters the trailing-28-night window —
+            // measured 2026-08-27, drop reason `sig changed: sleepNeedHours,sleepConsistency`, on a pass
+            // whose nights had JUST been banked by the previous one. Since the only thing they can ever
+            // invalidate is the `.sleep` trace array a cache hit replays, fold a CONSTANT `"off"` sentinel
+            // instead whenever `sleepTraceActive` is false (the default) — the two values then cannot move
+            // the signature at all, which is correct: they affect nothing a reused scan would replay.
+            // While the trace IS on (rare — a debugging session), fold the real quantized value so a
+            // genuine regularity change still invalidates the trace line, exactly as before. Kept at fixed
+            // POSITIONS in this list either way, so the `sig changed:` drop-attribution diff below (which
+            // is positional, matching the persisted `dayScanCacheConfigSig` string) stays correct without
+            // a disk-format change. `useMotionAwareWake` below widens what CAN feed `sleepConsistency`
+            // (it reclassifies wake→light, moving `efficiency`/stage minutes → `nightlyHours`) but does not
+            // itself churn — it's a static toggle already its own signature component.
+            ("sleepNeedHours", sleepTraceActive ? AnalyzeRecentConfigSignature.sleepNeedHours(sleepNeedHours) : "off"),
+            ("sleepConsistency", sleepTraceActive ? AnalyzeRecentConfigSignature.sleepConsistency(sleepConsistency) : "off"),
+            // `habitualMidsleepSec` is different: it SELECTS the overnight sleep-detection band
+            // (`SleepStageTotals.mainNightGroupIndices`), so it genuinely affects what a cached scan would
+            // have detected — stays unconditional, quantized as before.
             ("habitualMidsleepSec", AnalyzeRecentConfigSignature.habitualMidsleepSec(habitualMidsleepSec)),
             ("useSleepStagerV2", "\(useSleepStagerV2Global)"),
             ("useMotionAwareWake", "\(useMotionAwareWakeGlobal)"),

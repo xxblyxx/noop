@@ -548,14 +548,24 @@ object IntelligenceEngine {
             profile.age.toString(), profile.sex.toString(), profile.stepTicksPerStep.toString(),
             maxHROverride?.toString() ?: "nil",
             tzOffsetSeconds.toString(),
-            // #1005-CHURN: the three computeHabitualSleep-derived inputs are folded QUANTIZED, not raw.
-            // All three are computed from the "-noop" sleep sessions a PREVIOUS pass banked, so folding
-            // them exactly made the pass feed its own output back into its own cache identity — measured
-            // on iOS 2026-08-27 as a second full cold pass on every launch, re-scoring every night to a
-            // byte-identical result. The quanta sit far below display resolution, so a REAL change still
-            // invalidates. Signature only — analyzeDay below still receives the full-precision values.
-            AnalyzeRecentConfigSignature.sleepNeedHours(sleepNeedHours),
-            AnalyzeRecentConfigSignature.sleepConsistency(sleepConsistency),
+            // #1005-CHURN: sleepNeedHours/sleepConsistency are two of the three computeHabitualSleep-derived
+            // inputs, and unlike habitualMidsleepSec below they feed NOTHING pass 2 reads — AnalyticsEngine
+            // consumes them only for DayResult.restScore (pass-1-only; pass 2 always recomputes Rest from
+            // Rest.composite(daily:)'s OWN defaults) and the .sleep trace line. Quantizing them (the
+            // original fix, kept for the sink-active path below) was NOT enough: sleepConsistency is a
+            // trailing-28-night regularity index, so re-banking a fresh night moves it by more than any
+            // reasonable quantum — measured on iOS 2026-09-01, `dayCache DROPPED — sig changed:
+            // sleepConsistency … reused=0/14`, on the exact passes the cache exists to help. Fold a CONSTANT
+            // "off" sentinel instead whenever the Sleep trace is inactive (sleepTraceSink == null, the
+            // default) — the two values then cannot move the signature at all, which is correct: outside the
+            // trace nothing downstream of a cache hit ever reads them. Twin of the Swift
+            // `sleepTraceActive ? … : "off"` fold (IntelligenceEngine.swift); Kotlin already disables PER-DAY
+            // reuse while sleepTraceSink != null (dayCacheEligible above), but this whole-cache-clear check
+            // runs regardless, so the churn was real here too.
+            if (sleepTraceSink != null) AnalyzeRecentConfigSignature.sleepNeedHours(sleepNeedHours) else "off",
+            if (sleepTraceSink != null) AnalyzeRecentConfigSignature.sleepConsistency(sleepConsistency) else "off",
+            // habitualMidsleepSec is different: it SELECTS the overnight sleep-detection band, so it
+            // genuinely affects what a cached scan would have detected — stays unconditional, quantized.
             AnalyzeRecentConfigSignature.habitualMidsleepSec(habitualMidsleepSec),
             useExperimentalSleepV2.toString(), useMotionAwareWake.toString(),
             deepHrvWindow.toString(), spo2CandidateDisplay.toString(),

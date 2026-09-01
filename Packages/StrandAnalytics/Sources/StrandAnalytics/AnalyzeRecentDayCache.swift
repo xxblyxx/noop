@@ -73,10 +73,20 @@ public enum AnalyzeRecentDayCache {
 /// …on a pass whose 9 nights were all sitting in the cache the previous pass had just filled, and which
 /// then produced byte-identical output for every one of them. 255 s of pure waste, every launch.
 ///
-/// **Quantize rather than drop.** These are genuine scoring inputs: a real change (a habitual bedtime
-/// actually shifting, a new night extending the window) MUST still invalidate, or every cached night goes
-/// stale against a real profile change — a correctness regression traded for speed. Rounding to a quantum
-/// far below display resolution keeps that invalidation and removes only the re-banking noise.
+/// **Quantize rather than drop** — the original fix, and still what `habitualMidsleepSec` uses below.
+/// These are genuine scoring inputs: a real change (a habitual bedtime actually shifting, a new night
+/// extending the window) MUST still invalidate, or every cached night goes stale against a real profile
+/// change — a correctness regression traded for speed. Rounding to a quantum far below display resolution
+/// keeps that invalidation and removes only the re-banking noise.
+///
+/// **`sleepNeedHours` / `sleepConsistency` needed a second fix.** Quantizing them was NOT enough:
+/// re-banking a fresh night moves `sleepConsistency` (a trailing-28-night regularity index) by more than
+/// any reasonable quantum, so the drop still fired on every pass with new sleep data — measured
+/// 2026-09-01, `dayCache DROPPED — sig changed: sleepConsistency … reused=0/14`, on the exact passes the
+/// cache exists to help. The caller (`IntelligenceEngine.analyzeRecent`) now folds these two only while a
+/// Sleep-trace test mode is active (a constant sentinel otherwise) — see that call site's comment for why
+/// that is safe: outside a trace, neither value feeds anything a cache hit replays. This type's quantizing
+/// functions are unchanged and still used on the trace-on path.
 ///
 /// **Signature-only.** Nothing here touches what reaches `analyzeDay` — the full-precision values still
 /// thread through to scoring unchanged, so no score, tier or displayed number moves. That separation is the
