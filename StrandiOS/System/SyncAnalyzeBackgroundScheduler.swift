@@ -28,16 +28,21 @@ enum SyncAnalyzeBackgroundScheduler {
     /// Register at launch, before the first scene finishes connecting — iOS only delivers a background
     /// task whose identifier was registered at launch AND listed in `BGTaskSchedulerPermittedIdentifiers`
     /// (project.yml).
-    static func register(perform operation: @escaping @MainActor () async -> Void) {
+    /// `operation` returns whether the pass actually scored anything (`false` = the fingerprint gate
+    /// found nothing new, the common case) — recorded as the delivered task's outcome.
+    static func register(perform operation: @escaping @MainActor () async -> Bool) {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
             let completion = TaskCompletionGuard(task: task)
             let worker = Task { @MainActor in
-                await operation()
+                BackgroundAnalyzeTelemetry.recordFire()
+                let scored = await operation()
                 guard !Task.isCancelled else { return }
+                BackgroundAnalyzeTelemetry.recordOutcome(scored ? .scored : .noop)
                 completion.finish(success: true)
             }
             task.expirationHandler = {
                 worker.cancel()
+                BackgroundAnalyzeTelemetry.recordOutcome(.expired)
                 completion.finish(success: false)
             }
         }
@@ -56,8 +61,14 @@ enum SyncAnalyzeBackgroundScheduler {
         request.requiresNetworkConnectivity = false
         do {
             try BGTaskScheduler.shared.submit(request)
+            BackgroundAnalyzeTelemetry.recordSubmit(ok: true, error: nil)
             return true
         } catch {
+            // Was swallowed before — capture it. `.notPermitted` here means the `processing` mode /
+            // `.analyze` identifier never took effect on this install (an OTA upgrade over a build
+            // without them needs a fresh install), which a bare `false` could not distinguish from
+            // "iOS declined to run it".
+            BackgroundAnalyzeTelemetry.recordSubmit(ok: false, error: error)
             return false
         }
     }

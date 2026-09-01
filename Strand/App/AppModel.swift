@@ -672,10 +672,14 @@ final class AppModel: ObservableObject {
     /// ONLY ever called from `SyncAnalyzeBackgroundScheduler`'s registered operation, which iOS invokes
     /// exclusively while backgrounded — so, unlike every other post-analyze site in this file, this one
     /// does not need its own foreground/background check before notifying.
-    func runBackgroundAnalyze() async {
+    /// Returns whether the pass actually scored anything — `false` when it was skipped (a sync already
+    /// in flight) or `analyzeIfStale`'s fingerprint gate found nothing new. The caller
+    /// (`SyncAnalyzeBackgroundScheduler`) records it as the delivered task's outcome.
+    @discardableResult
+    func runBackgroundAnalyze() async -> Bool {
         guard !live.backfilling, !live.analyzing else {
             live.append(log: "background analyze: skipped, offload/analyze already in flight")
-            return
+            return false
         }
         // #1005-STORM: claim `live.analyzing` manually, same reasoning as `refreshAfterCompletedBackfill`
         // above (`:614-628`) — `analyzeIfStale` calls `analyzeRecent`, whose own `computing = true` lands
@@ -689,13 +693,14 @@ final class AppModel: ObservableObject {
         defer { live.analyzing = false }
         let scored = await intelligence.analyzeIfStale()
         live.append(log: "background analyze: scored=\(scored)")
-        guard scored else { return }
+        guard scored else { return false }
         await refreshV5Signals()
         await WidgetSnapshot.publish(from: self)
         await healthWriteBack?()
         if behavior.syncCompleteNotify {
             AnalyzeCompleteNotifier.post()
         }
+        return true
     }
     #endif
 

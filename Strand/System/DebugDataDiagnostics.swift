@@ -64,6 +64,8 @@ enum DebugDataDiagnostics {
             lines.append("             scoped-access \(scoped ? "ok" : "FAILED"), bookmark \(bmOk ? "ok" : "FAILED")")
         }
         lines.append("Backup mode:  \(FolderBackup.useInternalFolder ? "NOOP's own folder (#52 fallback)" : (FolderBackup.hasFolder ? "external folder" : "none chosen"))")
+        // #1005-STORM: did the deferred-analyze BGProcessingTask run overnight, and what did it do?
+        lines += BackgroundAnalyzeTelemetry.debugLines()
         #endif
         #if os(macOS)
         // #278: macOS Backup & Sync restore-list health. When a user reports "restore shows no files",
