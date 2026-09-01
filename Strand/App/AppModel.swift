@@ -415,6 +415,20 @@ final class AppModel: ObservableObject {
                 Task { [weak self] in await self?.refreshAfterCompletedBackfill() }
             }
             .store(in: &hrCancellables)
+        #if os(iOS)
+        // #1005-STORM follow-up: a SECOND, UNDEBOUNCED subscription on the same publisher, purely to arm
+        // the BGProcessingTask fallback the instant an offload completes — see `armBackgroundAnalyzeFallback`'s
+        // doc for why the 30s-debounced sink above is too late for this specific purpose (a suspend can
+        // land inside that 30s window, before it ever fires). Two independent sinks on one publisher, not
+        // one sink doing two things, so a future change to the debounced refresh's timing/logic can never
+        // accidentally widen or narrow this window too.
+        live.$lastSyncedAt
+            .dropFirst()
+            .compactMap { $0 }
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.armBackgroundAnalyzeFallback?() }
+            .store(in: &hrCancellables)
+        #endif
 
         moments = (UserDefaults.standard.array(forKey: "moments") as? [Double] ?? [])
             .map { Date(timeIntervalSince1970: $0) }
@@ -660,6 +674,17 @@ final class AppModel: ObservableObject {
     /// A closure rather than a direct reference because `HealthKitBridge` owns iOS-only HealthKit state
     /// while this type is shared with macOS, and the bridge is a `@StateObject` the app scene owns.
     var healthWriteBack: (() async -> Void)?
+
+    /// `SyncAnalyzeBackgroundScheduler.schedule()`, set by `StrandiOSApp` (#1005-STORM follow-up). Called
+    /// the INSTANT an offload completes (`live.lastSyncedAt` stamps), not only on `.background` scene
+    /// transitions — the original one-request-per-backgrounding design left the strap-disconnects-
+    /// right-after-HISTORY_COMPLETE case with nothing armed: the app may already have been backgrounded
+    /// hours earlier (that request long since delivered/discarded/superseded), and the NEXT backgrounding
+    /// that would normally re-arm it never comes because the process gets suspended right here instead.
+    /// Arming on every completed offload — not gated on scene phase — closes that gap directly: a
+    /// foreground call is a harmless no-op request that just sits pending, matching the same
+    /// re-submit-on-every-transition tolerance `HealthWritebackBackgroundScheduler` already relies on.
+    var armBackgroundAnalyzeFallback: (() -> Void)?
 
     /// `SyncAnalyzeBackgroundScheduler`'s task body (#1005-STORM). Covers the gap
     /// `refreshAfterCompletedBackfill` can't: the strap disconnects right after HISTORY_COMPLETE (taken off

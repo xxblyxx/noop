@@ -95,6 +95,11 @@ struct StrandiOSApp: App {
         model.healthWriteBack = { [weak bridge] in
             _ = await bridge?.writeBackAfterNewData()
         }
+        // #1005-STORM follow-up: arm the deferred-analyze fallback on every completed offload, not only on
+        // `.background` scene transitions — see `AppModel.armBackgroundAnalyzeFallback`'s doc.
+        model.armBackgroundAnalyzeFallback = {
+            SyncAnalyzeBackgroundScheduler.schedule()
+        }
         // #1005-STORM: register the deferred-analyze BGProcessingTask handler BEFORE launch finishes —
         // same registration requirement as ScheduledDebugExport above. `schedule()` is called from the
         // `.background` scenePhase transition, not here; this call only teaches iOS the identifier exists.
@@ -266,11 +271,13 @@ struct StrandiOSApp: App {
                 // Re-submit on every transition because iOS may discard an old best-effort request.
                 HealthWritebackBackgroundScheduler.updateSchedule(
                     isAuthorized: health.auth == .authorized)
-                // #1005-STORM: one request per backgrounding, not a standing cadence — see
-                // SyncAnalyzeBackgroundScheduler's doc for why this deliberately isn't a self-re-arming
-                // scheduler like the health write-back one above. Log a submit failure here (distinct
-                // from "the task never ran" — model.runBackgroundAnalyze's own log line covers that)
-                // so the two don't read as the same silence on a device pull.
+                // #1005-STORM follow-up: `SyncAnalyzeBackgroundScheduler` now ALSO self-re-arms from
+                // inside its own task body (see its doc) — this call is the "as soon as possible" request
+                // for a genuine new opportunity (backgrounding), same shape as the health write-back call
+                // above; the self-re-arm is the bounded floor for when nothing else prompts one. Log a
+                // submit failure here (distinct from "the task never ran" — `BackgroundAnalyzeTelemetry`'s
+                // `lastFireAt`/`lastOutcome` cover that) so the two don't read as the same silence on a
+                // device pull.
                 if !SyncAnalyzeBackgroundScheduler.schedule() {
                     model.live.append(log: "background analyze: BGProcessingTask submit failed")
                 }

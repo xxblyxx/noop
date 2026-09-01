@@ -2,21 +2,21 @@
 import BackgroundTasks
 import Foundation
 
-/// One-shot background pass that scores already-banked strap data when the foreground/BLE-connected
-/// analyze path (`AppModel.refreshAfterCompletedBackfill`) never got to run — the strap disconnected
-/// right after HISTORY_COMPLETE (taken off to charge, walked out of range) before its 30s post-offload
-/// debounce fired or its analyze pass finished, and iOS suspended the process. `bluetooth-central` only
-/// keeps NOOP alive for an ACTIVE BLE session, not after the link drops, so this is the only path that
-/// finishes a deferred night's scoring without the user reopening the app. #1005-STORM.
+/// Background pass that scores already-banked strap data when the foreground/BLE-connected analyze path
+/// (`AppModel.refreshAfterCompletedBackfill`) never got to run — the strap disconnected right after
+/// HISTORY_COMPLETE (taken off to charge, walked out of range) before its 30s post-offload debounce fired
+/// or its analyze pass finished, and iOS suspended the process. `bluetooth-central` only keeps NOOP alive
+/// for an ACTIVE BLE session, not after the link drops, so this is the only path that finishes a deferred
+/// night's scoring without the user reopening the app. #1005-STORM.
 ///
-/// Deliberately does NOT self-re-arm inside its own task body, unlike `HealthWritebackBackgroundScheduler`
-/// (which is "always plausibly pending" while HealthKit access stays authorized). An analyze wake is
-/// USUALLY a no-op — `AppModel.runBackgroundAnalyze` defers to `analyzeRecent`'s `force: false` fingerprint
-/// gate, which correctly skips when nothing changed since the last pass. A permanent re-arm would buy a
-/// standing background cadence for a handler that has nothing to do most of the time; instead `schedule()`
-/// is called once per `.background` scene transition (mirroring the debug-export / health-writeback
-/// re-submit-on-every-transition pattern), so a request exists only when the app might actually have left
-/// something unscored.
+/// **Self-re-arms inside its own task body** (#1005-STORM follow-up), mirroring
+/// `HealthWritebackBackgroundScheduler` — see `BackgroundAnalyzeSchedulePolicy`'s doc for why the original
+/// deliberately-one-shot design left real nights unscored. `schedule()` is still ALSO called on every
+/// `.background` scene transition and on every completed offload (`AppModel.armBackgroundAnalyzeFallback`)
+/// — those submit with NO `earliestBeginDate` (fire as soon as iOS is willing; a genuine new opportunity),
+/// while the self-re-arm here submits with an explicit, policy-driven one, so it stays a bounded floor
+/// rather than an unbounded standing cadence. Whichever call happens most recently wins (both `cancel()`
+/// the pending request first), which is correct — the most recent signal is the most informative one.
 ///
 /// Opportunistic, not a guarantee — `BGProcessingTaskRequest` scheduling is entirely up to iOS and may be
 /// delayed or skipped, especially unplugged. This is an ADDITIONAL path, not a replacement for the one
@@ -35,9 +35,15 @@ enum SyncAnalyzeBackgroundScheduler {
             let completion = TaskCompletionGuard(task: task)
             let worker = Task { @MainActor in
                 BackgroundAnalyzeTelemetry.recordFire()
+                // Arm the successor BEFORE doing any work, mirroring
+                // `HealthWritebackBackgroundScheduler.register` — an expiration below cannot leave the
+                // deferred-analyze path permanently unscheduled. Conservative (`scored: false`) interval
+                // since the outcome isn't known yet; tightened below if this pass actually scores.
+                scheduleReArm(scored: false)
                 let scored = await operation()
                 guard !Task.isCancelled else { return }
                 BackgroundAnalyzeTelemetry.recordOutcome(scored ? .scored : .noop)
+                if scored { scheduleReArm(scored: true) }
                 completion.finish(success: true)
             }
             task.expirationHandler = {
@@ -48,17 +54,31 @@ enum SyncAnalyzeBackgroundScheduler {
         }
     }
 
-    /// Submit one request. Called from the `.background` scene-phase transition; NOT called from inside
-    /// the task's own body — see the type doc for why this is deliberately one-shot, not self-re-arming.
-    /// Returns whether the submit itself succeeded (distinct from whether iOS ever actually RUNS the
-    /// task, which this can't observe) — the caller logs a failure, since `runBackgroundAnalyze`'s own
-    /// "scored=" line only tells the device log the task fired at all, not that requesting it worked.
+    /// Submit one request that fires as soon as iOS is willing (no `earliestBeginDate`) — a genuine new
+    /// opportunity: called from the `.background` scene-phase transition and from
+    /// `AppModel.armBackgroundAnalyzeFallback` on every completed offload. Returns whether the submit
+    /// itself succeeded (distinct from whether iOS ever actually RUNS the task, which this can't observe)
+    /// — the caller logs a failure, since `runBackgroundAnalyze`'s own "scored=" line only tells the
+    /// device log the task fired at all, not that requesting it worked.
     @discardableResult
     static func schedule() -> Bool {
+        submit(earliestBeginDate: nil)
+    }
+
+    /// The self-re-arm submitted from inside the task's own body — see `BackgroundAnalyzeSchedulePolicy`.
+    /// Private: every OTHER caller wants "as soon as possible" (`schedule()`), never a deferred date.
+    private static func scheduleReArm(scored: Bool) {
+        let date = BackgroundAnalyzeSchedulePolicy.earliestBeginDate(after: Date(), scored: scored)
+        submit(earliestBeginDate: date)
+    }
+
+    @discardableResult
+    private static func submit(earliestBeginDate: Date?) -> Bool {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
         let request = BGProcessingTaskRequest(identifier: taskIdentifier)
         request.requiresExternalPower = false
         request.requiresNetworkConnectivity = false
+        request.earliestBeginDate = earliestBeginDate
         do {
             try BGTaskScheduler.shared.submit(request)
             BackgroundAnalyzeTelemetry.recordSubmit(ok: true, error: nil)
