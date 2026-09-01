@@ -266,14 +266,37 @@ difference between "we checked and it held" and "someone got tired of seeing it.
     change wires them into `Rest.composite(daily:)`'s `daily:` call sites, claim (d)'s conditional
     signature fold must be revisited (see `9e273316`'s message and
     `RestCompositeDailyDefaultsTests.swift`, which fails loudly if that happens).
-  A background-task re-arm fix (Commit 5 of the same plan) and its own overnight claim are expected to
-  land on this branch next; when they do, extend this entry again rather than opening a new one.
-- check-after: 2026-08-28
-  (bumped from 2026-08-25 after the partial check recorded in `blocked-because`. What is still
-  owed: the CPU/pass-count half re-measured once the follow-up floor fix lands; one eyes-on morning
-  sync for the progress bar; and Commit 5's narrower disconnect-right-after-HISTORY_COMPLETE case.
-  The entry stays Open until all three are answered — the 2026-08-25 pull settles none of them. Now
-  ALSO covers claims (d)/(f) above, due on the same first-real-morning-sync-after-install check.)
+  - **claim (e) — `a0fe2398` (fix(background): re-arm the analyze background task…), the overnight
+    claim this whole update exists to eventually settle:** `noop.analyze.bg.fireCount` (added in
+    `c785e90d`) increments at least once between roughly 01:00 and 08:00 local on a night with a real
+    overnight offload, and `noop.analyze.bg.lastOutcome` reads `scored` on the morning after such a
+    night — i.e. the strap's overnight data is scored WITHOUT the app being foregrounded. This is the
+    direct fix for the 2026-09-01 report and the reason this update exists. Falsifiers each read
+    differently: `noop.analyze.bg.lastSubmitOK == false` with a `lastSubmitError` naming
+    `.notPermitted` ⇒ the `processing` background mode / `.analyze` task identifier never took effect
+    on this install (`project.yml` already warns an upgrade install may not pick it up) — needs a
+    delete-and-fresh-install, NOT a further code change; `fireCount` flat across the night with
+    `lastSubmitOK == true` ⇒ iOS is declining to run BGProcessing on this device/charging state, a
+    scheduling-policy finding distinct from a code bug; `lastOutcome == expired` ⇒ the pass still
+    doesn't fit inside whatever wall-clock budget iOS grants a `BGProcessingTask` here, and Half B
+    (claims (d)/(f)) needs to go further before this can pass.
+- claim-set status as of `a0fe2398` (2026-09-01): (d) and (f) are shipped and awaiting their first real
+  morning; (e) additionally needs the phone genuinely backgrounded overnight with the strap in range for
+  at least one real offload. Pull the plist per `check` below and read BOTH the `strapLog.tail`
+  `analyzeRecent` lines AND the `noop.analyze.bg.*` keys (a debug export's "Background analyze" block —
+  new in `c785e90d` — carries the same numbers if a devicectl pull isn't convenient) in the same session;
+  a partial answer (only one of the two readable) is not enough to close any of (d)/(e)/(f).
+- check-after: 2026-09-02
+  (bumped from 2026-08-28 — that date passed with no new device pull recorded against the original
+  three items below. What is still owed, unchanged: the CPU/pass-count half re-measured once the
+  follow-up floor fix lands; one eyes-on morning sync for the progress bar; and the narrower
+  disconnect-right-after-HISTORY_COMPLETE case for the ORIGINAL Commit 5 of this branch's first plan
+  (`5478d84f` era — not to be confused with `a0fe2398`, the 2026-09-01 re-arm fix, a different Commit 5
+  from a different, later plan). The entry stays Open until all three are answered. Now ALSO covers
+  claims (d)/(e)/(f) above — (d)/(f) need only a real morning sync to check; (e) needs that sync to have
+  genuinely happened overnight/backgrounded, which the original three items don't require quite as
+  strictly. Requires a fresh install per the `a0fe2398` message if claim (e) reads `lastSubmitOK ==
+  false` — do not re-check on the same install a second time expecting a different answer.)
 
 ### The analyze-pass-cost diagnostics are readable on a real morning, and the #1575 port didn't break trace replay
 - id: analyze-pass-cost-instrumentation
