@@ -286,8 +286,63 @@ difference between "we checked and it held" and "someone got tired of seeing it.
   `analyzeRecent` lines AND the `noop.analyze.bg.*` keys (a debug export's "Background analyze" block —
   new in `c785e90d` — carries the same numbers if a devicectl pull isn't convenient) in the same session;
   a partial answer (only one of the two readable) is not enough to close any of (d)/(e)/(f).
-- check-after: 2026-09-02
-  (bumped from 2026-08-28 — that date passed with no new device pull recorded against the original
+- **2026-09-02 update — device pull done (iPhone `819D37A3`, iOS 26.6.1, NOOP 10.1.1 build 227, WHOOP
+  5.0). Claim (e) FALSIFIED for the reason none of its three listed falsifiers named; a new fix branch
+  (`fix/analyze-cost-and-visibility`) is in flight.** Two `com.bly.noop.plist` pulls (08:24, 08:27)
+  plus three foreground Recompute passes, plus `--domain-type systemCrashLogs`.
+  - **Offload was current, scoring was 6.5 h behind.** `noop.analyzeWatermark` = 01:49:11 (unchanged
+    between pulls); `noop.analyze.lastPassEndedAt` = 01:52:43; `lastSyncedAt` advanced 08:23:29 →
+    08:27:09. The 08:21:46 backfill round logged `reached the end of available history
+    (trim=0xFFFFFFFF)` — the strap had handed everything over. The Sleep screen's "Woke 1:48 AM" was
+    the watermark, not a detected awakening; the owner slept through.
+  - **Claim (e) — the overnight BGProcessingTask DID fire and was KILLED, not deferred.**
+    `noop.analyze.bg.fireCount` = 7, `lastFireAt` = **01:56:05** — so iOS is not "declining to run
+    BGProcessing" (falsifier 2 does not apply), and `lastSubmitOK` = true with no `lastSubmitError`
+    (falsifier 1 does not apply — no fresh install needed on that account). But `lastOutcome` was still
+    `scored` from `lastOutcomeAt` = 2026-09-01 **23:25:56** (the evening before), and
+    `lastPassEndedAt` (01:52:43) predates `lastFireAt` (01:56:05): the 01:56 pass started and recorded
+    no outcome at all — not even `.expired`. The crash logs say why:
+  - **iOS killed the pass for CPU. 15 × `cpu_resource_fatal` on 2026-08-31 and 2026-09-01.** Sample
+    (`NOOP Staging.cpu_resource_fatal-2026-09-01-172845.ips`): `Action taken: Process killed` /
+    `48 seconds cpu time over 48 seconds (100% cpu average), exceeding limit of 80% cpu over 60
+    seconds` / `Footprint: 91.48 MB` / `Non-Frontmost App, Thread QoS Background, e-core`. The
+    09-01 01:17–01:39 cluster is the night behind the 2026-09-01 truncated-wake report this update
+    chain exists for. Memory is ruled out (91 MB; in `JetsamEvent-2026-09-02-061823.ips` NOOP is a
+    bystander with no kill reason). So (e)'s third falsifier is the closest — "the pass still doesn't
+    fit inside whatever budget iOS grants" — but it is the **CPU** budget (80% / 60 s ≈ 48 s), not a
+    wall-clock one, and the process is SIGKILLed rather than expired.
+  - **Half B (d)/(f): `prep` alone exceeds the background CPU budget.** Three back-to-back foreground
+    passes: `prep=66673ms score=259177ms` → `prep=61873ms score=57400ms` → `reused=14/15
+    prep=71603ms score=17906ms`. `score` fell 259 s → 18 s as the cache warmed; **`prep` did not
+    move.** On pass 3, `reused=14/15` + `skipHits=6` accounts for all 21 day slots, so exactly one
+    day reached `tPrep0` (`IntelligenceEngine.swift:1055`) — i.e. ~71 s is **one day's store reads**
+    (`hrSamples` + rr/resp/gravity/steps over a ~54 h window). One day already blows the 48 s
+    background budget, which is why no background pass has ever reached the scoring phase. Claim (d)'s
+    signature-churn concern checks out fine: `dayCache DROPPED — sig changed: habitualMidsleepSec`
+    fired once (cold `habitualMidsleepSec` moving off nil, exactly the "misread guard" case) and the
+    cache then held on pass 3 — not a loop.
+  - **`SleepStager` is correct and self-healing** — the foreground Recompute advanced the watermark
+    01:49:11 → 08:37:20 and re-scored the night as 549 min (9h09m), `source=computed`, via
+    `MetricsCache.upsertSleepSessions`' `ON CONFLICT(endTs)`. Nothing in the stager needs a fix; the
+    2026-09-01 root-cause paragraph above still stands as written.
+  - **Progress bar: still UNTESTED.** Its `.analyze` phase is only reachable from
+    `refreshAfterCompletedBackfill`, which did not run during any observed sync this morning — the
+    idle-tick pass that ran never touches `syncProgress`. Nobody was watching Today. Unchanged from
+    2026-08-25.
+  - **Confound noted:** the crash reports show `Low Power Mode: Enabled` — per the owner this was iOS
+    26's Adaptive Power, disabled 2026-09-02. Post-fix CPU/scheduling numbers are not directly
+    comparable to this baseline.
+  - **Next:** `fix/analyze-cost-and-visibility` — cut `prep` below the budget (load-bearing), stop
+    doing heavy work on a BLE state-restoration wake, surface pending scoring on the Sleep screen, add
+    a `BGContinuedProcessingTask` on-battery backstop, and set `requiresExternalPower` on an extra
+    overnight request. Acceptance: zero new `NOOP*.cpu_resource*` reports (baseline **15**) after an
+    overnight with the strap worn and the phone unplugged on waking as usual. Plan:
+    `~/.claude/plans/check-my-phone-the-graceful-trinket.md`.
+- check-after: 2026-09-16
+  (bumped from 2026-09-02 — that date's pull is the "2026-09-02 update" above: it answered claim (e)
+  in the negative and redirected the work to `fix/analyze-cost-and-visibility`. Re-check once that
+  branch has shipped and survived one real overnight.
+  Earlier note, still in force: bumped 2026-08-28 → 2026-09-02 with no new device pull recorded against the original
   three items below. What is still owed, unchanged: the CPU/pass-count half re-measured once the
   follow-up floor fix lands; one eyes-on morning sync for the progress bar; and the narrower
   disconnect-right-after-HISTORY_COMPLETE case for the ORIGINAL Commit 5 of this branch's first plan
