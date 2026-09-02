@@ -5,6 +5,7 @@ import WhoopStore
 import StrandAnalytics
 import StrandImport
 #if os(iOS)
+import UIKit
 import UserNotifications
 #endif
 
@@ -520,7 +521,18 @@ final class AppModel: ObservableObject {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     backfillWaited += 1
                 }
-                if self.live.backfilling || self.live.analyzing {
+                // #1005-COST (2026-09-02): never run this heavy backstop pass while the process is in the
+                // background — including a CoreBluetooth state-restoration launch, which is how the app is
+                // usually running when this loop's first iteration fires on a morning sync. One uncached
+                // day of scoring is ~70 s of CPU against iOS's ~48 s non-frontmost budget (device
+                // `819D37A3`: 15 `cpu_resource_fatal` kills, 08-31/09-01). The `BGProcessingTask` fallback
+                // handles background scoring; foregrounding drives a fresh sync + `refreshAfterCompletedBackfill`.
+                // Short re-check sleep below so the pass runs promptly once the app is foregrounded.
+                var tickDeferredForBackground = false
+                if self.isRunningInBackground {
+                    tickDeferredForBackground = true
+                    self.live.append(log: "analyze: idle tick skipped — app backgrounded, deferring to BGProcessingTask")
+                } else if self.live.backfilling || self.live.analyzing {
                     self.live.append(log: "analyze: idle tick skipped — sync still in flight")
                 } else {
                     // #836: the steady-state tick is a BACKSTOP, not a data-driven refresh — every real update
@@ -548,7 +560,12 @@ final class AppModel: ObservableObject {
                 // harmless path to the same outcome (whichever fires first wins; the other's `analyzeRecent`
                 // call is a normal, cheap re-check against the (by-then-likely-satisfied) floor).
                 let sleepSeconds: Double
-                if let dueAt = self.intelligence.deferredRescoreDueAt {
+                if tickDeferredForBackground {
+                    // Re-check within a minute so a foreground the loop would otherwise sleep 30 min
+                    // through gets a pass promptly — cheap, since a still-backgrounded re-check just logs
+                    // and sleeps again.
+                    sleepSeconds = 60
+                } else if let dueAt = self.intelligence.deferredRescoreDueAt {
                     sleepSeconds = min(1800, max(1, dueAt.timeIntervalSinceNow))
                 } else {
                     sleepSeconds = 1800
@@ -729,6 +746,23 @@ final class AppModel: ObservableObject {
     }
     #endif
 
+    /// True only on iOS while the process is running in the background — a CoreBluetooth
+    /// state-restoration launch, or a `.background` scene phase. Used to keep the heavy
+    /// `analyzeRecent` pass OFF the short, CPU-metered background window: iOS SIGKILLs a
+    /// non-frontmost process that averages >80% CPU over 60 s (≈ 48 s of CPU time), and one
+    /// uncached day of scoring alone exceeds that — device `819D37A3` logged 15 `cpu_resource_fatal`
+    /// kills over 2026-08-31/09-01, none of which reached the scoring phase. The sanctioned
+    /// background scoring path is `SyncAnalyzeBackgroundScheduler`'s `BGProcessingTask`, armed on
+    /// every completed offload by the non-debounced `live.$lastSyncedAt` sink in `init()`. When this
+    /// is true the foreground analyze paths defer to it. Always false on macOS (no such metering).
+    var isRunningInBackground: Bool {
+        #if os(iOS)
+        UIApplication.shared.applicationState == .background
+        #else
+        false
+        #endif
+    }
+
     private func refreshAfterCompletedBackfill() async {
         // #1005-STORM (review finding #2): a second debounce firing while a prior pass is still running
         // must not touch `live.analyzing`/the bar at all — see `pendingPostOffloadRefresh`'s doc. Re-arm
@@ -818,8 +852,20 @@ final class AppModel: ObservableObject {
         // failure mode the 2026-08-23 plan's correction #7 finding 5 already fixed once, from a different
         // cause). `analyzeRecent` itself re-checks the SAME floor on its own entry — this outer check exists
         // only so the bar and the tick loop are never armed for a pass that is about to be floored anyway.
+        // #1005-COST (2026-09-02): an offload routinely completes while the app is BACKGROUNDED (it runs
+        // as a `bluetooth-central`, so it stays alive to receive the download — the comment at the widget
+        // publish below says the same). Running the full `analyzeRecent` from HERE, in that state, is what
+        // produced the 15 `cpu_resource_fatal` kills on device `819D37A3`: ~70 s of CPU for one uncached
+        // day against iOS's ~48 s non-frontmost budget, SIGKILLed before it ever reached the scoring phase.
+        // The `BGProcessingTask` fallback (`SyncAnalyzeBackgroundScheduler`) is already armed for exactly
+        // this by the non-debounced `live.$lastSyncedAt` sink in `init()`, and it gets a real window — so
+        // when backgrounded, do the cheap dashboard/Trends refresh above and the widget publish below, and
+        // leave the scoring to it. `repo.refresh(days: 120)` already ran; the progress bar is a
+        // foreground-only surface, so `beginAnalyze()` is correctly skipped too.
         let floored = intelligence.floorDecision(for: .postOffload)
-        if case .run = floored {
+        if isRunningInBackground {
+            live.append(log: "Backfill: analyze deferred to BGProcessingTask — app is backgrounded (dashboard cache refresh still applied)")
+        } else if case .run = floored {
             // #1005-STORM: drive the progress bar's analyze phase with a background tick loop, since
             // `analyzeRecent` is one opaque `await` with no per-day callback out to here (see `SyncProgress`'s
             // doc for why — wiring a real per-day signal out of its `Task.detached` loop is out of scope).
