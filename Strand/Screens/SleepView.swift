@@ -377,8 +377,9 @@ struct SleepView: View {
         .overlay(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
             .strokeBorder(StrandPalette.restColor.opacity(0.22), lineWidth: 1))
         .transition(.opacity)
+        // The ProgressView is `.accessibilityHidden`, so `.combine` reads just the `Text` — no
+        // separate `.accessibilityLabel` string to translate.
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Scoring last night from your strap")
     }
 
     /// A short night-relative label ("Last night" / "1 night ago" / "N nights ago") for the
