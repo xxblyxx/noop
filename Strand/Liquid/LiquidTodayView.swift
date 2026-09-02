@@ -47,6 +47,13 @@ struct LiquidTodayView: View {
 
     // async-loaded via the confirmed Repository accessors
     @State private var restScore: Double?          // sleep_performance, day-keyed
+    /// #402/#1001 parity with classic `TodayView.liveTodayStrain`: today's in-progress Effort, recomputed
+    /// in `load()` over the raw HR stream (logical-day midnight → now). The stored `dailyMetric.strain`
+    /// only refreshes when the heavy `analyzeRecent` pass runs — ~31 min on the reporter's device — so
+    /// early in the day the hero showed yesterday's Effort or a stale plateau. Combined with the stored
+    /// row via `StrainScorer.effectiveEffort` (a never-drop `max`, so a sparse-HR moment can't sink it).
+    /// nil for a navigated past day (those use the stored row) and below the scorer's sufficiency gate.
+    @State private var liveTodayStrain: Double?
     /// Input providers for the three scores, keyed by recovery / strain / sleep_performance.
     @State private var heroProviderByMetric: [String: ScoreInputProvider] = [:]
     @State private var stress: Double?             // StressModel(...).score, 0–3
@@ -178,6 +185,15 @@ struct LiquidTodayView: View {
     private var respDay: DailyMetric? { cachedRespDay }
     /// The Charge hero's resolved state (see `cachedChargeDisplay`), read O(1) from the cache.
     private var chargeDisplay: ChargeDisplay { cachedChargeDisplay }
+    /// The one Effort figure (NOOP 0–100 axis) every read-out on this screen must show — hero, Key
+    /// Metrics tile, zero-note gate. For today it floors the live in-progress recompute (`liveTodayStrain`)
+    /// on the stored daily row via `StrainScorer.effectiveEffort` (a never-drop `max`), exactly as classic
+    /// `TodayView.effortStrain` does. A navigated past day has no live value and uses the stored row.
+    /// #1001: the hero and the tile resolving Effort differently is the bug this centralisation prevents.
+    private var effortStrain: Double? {
+        StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
+                                     stored: displayDay?.strain)
+    }
 
     /// The actual O(days) resolution. Offset 0 prefers live repo.today; past offsets look up. Run ONCE
     /// per data/day change from load(), never from body.
@@ -613,7 +629,7 @@ struct LiquidTodayView: View {
             // one decimal on the compressed 0–21 axis to match the app-wide `effortDisplay` convention
             // (12.6, not a rounded "13"); the 0–100 hero stays a whole number as before.
             HeroScoreCell(label: String(localized: "Effort"),
-                          score: displayDay?.strain.map { UnitFormatter.effortValue($0, scale: effortScale) },
+                          score: effortStrain.map { UnitFormatter.effortValue($0, scale: effortScale) },
                           tint: StrandPalette.effortColor, animated: dataLoaded,
                           onGuide: { guideSection = .effort },
                           maxValue: effortScale == .whoop ? 21 : 100,
@@ -938,7 +954,7 @@ struct LiquidTodayView: View {
     /// card when today's Effort is ~0, so a calm day explains itself instead of a bare 0. Reuses classic's
     /// String Catalog entry verbatim — one key serves both Today screens.
     private var effortZeroNote: String? {
-        guard EffortDisplay.showsZeroNote(strain: displayDay?.strain, isToday: selectedDayOffset == 0) else { return nil }
+        guard EffortDisplay.showsZeroNote(strain: effortStrain, isToday: selectedDayOffset == 0) else { return nil }
         return String(localized: "No cardio load yet. Effort builds once your heart rate climbs into your effort zone (around 50% of your heart-rate reserve). A calm day honestly reads near zero.")
     }
 
@@ -1134,7 +1150,9 @@ struct LiquidTodayView: View {
             // stays raw, matching the Effort hero, which correctly does not carry.
             ktile(String(localized: "Recovery"), icon: keyMetricIcon(metric), intText(chargeDisplay.pct), "%", StrandPalette.chargeColor, frac(chargeDisplay.pct), key: "recovery")
         case .effort:
-            ktile(String(localized: "Strain"), icon: keyMetricIcon(metric), intText(displayDay?.strain), "%", StrandPalette.effortColor, frac(displayDay?.strain), key: "strain")
+            // #1001: the SAME resolved Effort the hero draws (`effortStrain` — live-floored today, stored
+            // row for a past day), not `displayDay?.strain` raw, so the tile and the hero can't disagree.
+            ktile(String(localized: "Strain"), icon: keyMetricIcon(metric), intText(effortStrain), "%", StrandPalette.effortColor, frac(effortStrain), key: "strain")
         case .rest:
             ktile(String(localized: "Rest"), icon: keyMetricIcon(metric), intText(restScore), "%", StrandPalette.restColor, frac(restScore), key: "sleep_performance")
         case .hrv:
@@ -1500,6 +1518,26 @@ struct LiquidTodayView: View {
         importedActiveKcalDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.activeKcal }.max()
         hrValues = (await hrA).map { $0.bpm }
         workouts = await wkA
+
+        // #402/#1001: today's in-progress Effort over the raw HR stream (logical-day midnight → now), with
+        // the SAME HRmax resolution the daily pass persists (`AnalyticsEngine`: manual override first, else
+        // Tanaka from age) and the day's resting HR else the default — so `live` and `stored` sit on one
+        // scale and `effortStrain`'s `max` never flip-flops between two HRmax bases. Matches Android
+        // `TodayScreen.liveTodayStrain`. Read serially like classic `TodayView`, but with `limit: 200_000`
+        // (the scoring pass's own day-read limit) NOT the 8 000 default — on a 1 Hz strap the default
+        // truncates to the first ~2 h of the day, which for an afternoon workout integrates to ~0 and
+        // defeats the point. `StrainScorer.strain` returns nil below its sufficiency gate, and
+        // `effortStrain` then floors on the stored row, so a sparse-HR moment can never sink the hero.
+        if selectedDayOffset == 0 {
+            let todayHr = await repo.hrSamples(from: from, to: to, limit: 200_000)
+            let maxHR = profile.hrMaxOverride > 0
+                ? Double(profile.hrMaxOverride)
+                : (profile.age > 0 ? StrainScorer.tanakaHRmax(age: Double(profile.age)) : nil)
+            let restHR = day?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
+            liveTodayStrain = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR, sex: profile.sex)
+        } else {
+            liveTodayStrain = nil
+        }
 
         let (chargeSource, effortSource, restSource) = await (chargeSourceA, effortSourceA, restSourceA)
         let sourceResolutions = [
@@ -2154,9 +2192,9 @@ extension LiquidTodayView {
     /// The Effort hero's "no cardio load yet" honest note (#530 follow-up — Liquid parity with classic
     /// `TodayView.effortZeroNote`). Pure + static so the gate is testable with no view: the note shows
     /// ONLY for today when a strain value exists and is ~0 — a genuinely calm day reads near zero, while a
-    /// no-data day shows its own ring overlay and a past day is never annotated. Liquid reads
-    /// `displayDay?.strain` directly (it has no live-strain accumulator like classic's `liveTodayStrain`),
-    /// which is exactly the value its Effort hero draws.
+    /// no-data day shows its own ring overlay and a past day is never annotated. Fed `effortStrain` — the
+    /// same live-floored value the Effort hero and Key Metrics tile draw (#402/#1001) — so the note tracks
+    /// the number actually on screen rather than a stale daily row.
     enum EffortDisplay {
         static func showsZeroNote(strain: Double?, isToday: Bool) -> Bool {
             guard isToday, let s = strain else { return false }
