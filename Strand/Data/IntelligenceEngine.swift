@@ -946,6 +946,16 @@ final class IntelligenceEngine: ObservableObject {
             // read windows is worth building at all. Measured, not guessed.
             var dayPrepSeconds = 0.0
             var dayScoreSeconds = 0.0
+            // #1005-COST follow-up (2026-09-02): on device 819D37A3 a single UNCACHED day's `prep` is
+            // ~71 s while the same day's SQL profiles at <120 ms off-device — so the cost is GRDB row
+            // materialisation or the post-read session matching, not SQLite, and the 4:1 prep:score
+            // ratio the end-to-end tally already showed does not say WHICH. Split it three ways for
+            // one device pass so the next pull points at the exact culprit; a later commit narrows or
+            // indexes whatever this fingers and deletes these three lines. Summed across every
+            // uncached day in the pass, ms.
+            var prepHrReadMs = 0.0      // the hrSample ∪ ppgHrSample read alone (the UNION + anti-join)
+            var prepOtherReadMs = 0.0   // rr, resp, gravity, step, skinTemp, spo2, events, bandSleepState
+            var prepMatchMs = 0.0       // day-slice filtering, off-wrist pairing, provided-sleep — post-read
             // #1005-COST (port of upstream #1556): days that were actually CACHEABLE this pass (freshly
             // scored AND stored under a key). Together with `dayCacheReused` this is the honest denominator
             // for the reuse ratio: `maxDays` counts loop iterations, so a store holding 8 real nights in a
@@ -1055,6 +1065,8 @@ final class IntelligenceEngine: ObservableObject {
                 // whole point is that it performs neither phase.
                 let tPrep0 = Date()
                 let hr = (try? await store.hrSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
+                let tAfterHR = Date()
+                prepHrReadMs += tAfterHR.timeIntervalSince(tPrep0) * 1000
                 guard hr.count >= 200 else {
                     // This day still paid for its read; count it, or the tally under-reports exactly the
                     // sparse-history installs where reads dominate most. On this device 13 of the 21 day
@@ -1200,6 +1212,11 @@ final class IntelligenceEngine: ObservableObject {
                     bandSleepState = await Self.bandSleepStateSamples(computedId: computedId,
                                                                      from: from, to: to, store: store)
                 }
+                // #1005-COST follow-up: end of the windowed store reads for this day. Everything from
+                // `tAfterHR` to here is the non-HR streams; everything from here to `tScore0` is the
+                // pure-Swift matching between the reads and `analyzeDay`.
+                let tAfterNightReads = Date()
+                prepOtherReadMs += tAfterNightReads.timeIntervalSince(tAfterHR) * 1000
 
                 // #690: read the experimental-V2 toggle ONCE here (off the detached executor, matching the
                 // Repository self-heal call site) and capture the Bool, so the Settings toggle now drives the
@@ -1246,6 +1263,7 @@ final class IntelligenceEngine: ObservableObject {
                 // #1005-COST: the prep→score boundary. Everything above this line is store reads plus the
                 // session matching between them; everything `analyzeDay` does is below it.
                 let tScore0 = Date()
+                prepMatchMs += tScore0.timeIntervalSince(tAfterNightReads) * 1000
                 dayPrepSeconds += tScore0.timeIntervalSince(tPrep0)
                 let res = AnalyticsEngine.analyzeDay(day: day, hr: hr, rr: rr, resp: resp,
                                                      vendorResp: vendorResp, gravity: grav,
@@ -1539,6 +1557,12 @@ final class IntelligenceEngine: ObservableObject {
             // dominating means it is not, whatever the row counts look like.
             skippedDayLines.append("analyzeRecent cost prep=\(Int(dayPrepSeconds * 1000))ms "
                                    + "score=\(Int(dayScoreSeconds * 1000))ms")
+            // #1005-COST follow-up (2026-09-02): the three-way split of `prep` above. `hrRead` is the
+            // single hrSample∪ppgHrSample read, `otherReads` the seven remaining night streams,
+            // `match` the pure-Swift work between the reads and `analyzeDay`. One device pass decides
+            // whether a later commit narrows the 54 h read window, adds an index, or is aimed elsewhere.
+            skippedDayLines.append("analyzeRecent cost prep-split hrRead=\(Int(prepHrReadMs))ms "
+                                   + "otherReads=\(Int(prepOtherReadMs))ms match=\(Int(prepMatchMs))ms")
             // #1005-STORM follow-up: report whether the loop `break`ed early on cancellation. Pass 2's
             // window reconcile (stale-day eviction, provenance wide-delete) MUST NOT span the full
             // `maxDays` window when `out` covers only the newest days the loop reached — see
