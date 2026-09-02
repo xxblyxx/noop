@@ -151,6 +151,12 @@ struct SleepView: View {
                     // Each top-level section fades + rises in sequence on first appear (Reduce-Motion safe).
                     VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                         if let sleepUndo { sleepUndoBanner(sleepUndo) }
+                        // #1005-COST (2026-09-02): the scoring pass can lag the raw data by hours — a
+                        // background sync banks the night but the score only lands on the next foreground
+                        // or `BGProcessingTask` pass. Until this, the screen rendered whatever was stored
+                        // with nothing to say a fresher number was still coming, so a wake time sitting at
+                        // the edge of scored data read as final. Says so while a pass is in flight.
+                        if intelligence.computing { sleepScoringBanner }
                         // Bleed past ScreenScaffold's 16/24 gutters so the hero column is edge-to-edge
                         // in the upper band; the night scene itself is the fixed topBackground.
                         // Customize sits at the end of the hero (not floating in a blank band).
@@ -346,6 +352,33 @@ struct SleepView: View {
         .transition(.opacity)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(message)
+    }
+
+    /// Shown while `IntelligenceEngine` has a re-score pass in flight (`computing`). Mirrors the card
+    /// `IntelligenceView` already shows for the same state, in the Rest colour world — so a Sleep
+    /// screen whose numbers are about to change says so, rather than presenting a stored wake time
+    /// that sits at the edge of scored data as if it were final. Same visual idiom as
+    /// `sleepUndoBanner` above.
+    private var sleepScoringBanner: some View {
+        HStack(alignment: .center, spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(StrandPalette.restColor)
+                .accessibilityHidden(true)
+            Text("Scoring last night from your strap…")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+        }
+        .padding(NoopMetrics.space3)
+        .background(StrandPalette.restColor.opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
+            .strokeBorder(StrandPalette.restColor.opacity(0.22), lineWidth: 1))
+        .transition(.opacity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Scoring last night from your strap")
     }
 
     /// A short night-relative label ("Last night" / "1 night ago" / "N nights ago") for the
