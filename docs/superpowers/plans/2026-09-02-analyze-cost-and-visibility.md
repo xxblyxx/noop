@@ -135,13 +135,15 @@ device loop this plan calls for.
 | 1 | `f95febff` docs(pending-validation) — record the pull, falsify claim (e) | ✅ done |
 | 2 | `d4225454` perf(analyze) — **three-way `prep` split instrumentation**, NOT the fix itself | ✅ instrumentation only; real fix waits on the next device pull to read `prep-split hrRead=… otherReads=… match=…` |
 | 3 | `8eda1a36` fix(analyze) — no heavy pass on a background CoreBluetooth wake | ✅ done — the structural fix; `AppModel.isRunningInBackground` gates `refreshAfterCompletedBackfill` + the launch cadence loop |
-| 4 | `30628581` feat(sleep) — `sleepScoringBanner` while `intelligence.computing` | ✅ done — also covers the edit/delete/nap re-scores |
+| 4 | `30628581` feat(sleep) — `sleepScoringBanner` while `intelligence.computing`; `c1509b79` localises its string (10 locales) + drops the redundant a11y label | ✅ done — also covers the edit/delete/nap re-scores |
+| — | `7e4de371` docs(plans) — this file | ✅ |
 | 5 | `BGContinuedProcessingTask` on-battery backstop | ⏸ deferred — new iOS 26 API, needs an Info.plist identifier + a device build to test; can't validate this session |
 | 6 | `requiresExternalPower` extra overnight request | ⏸ deferred — untested scheduling-policy change; a wrong `true` constraint would *reduce* background scoring. Verify on device before writing |
 | 7 | checkpoint `dayScanCache` per day | ⏸ deferred — hottest file in the repo + Kotlin twin (`AnalyzeRecentDayCache`); needs a real interrupted pass to validate resume |
 
-All four landed commits build clean on macOS **and** iOS (`NOOPiOS` scheme); `doc_comment_lint`
-and `i18n_audit --ci` pass. Off-device SQL profiling of one day's 54 h window: **<120 ms** — so the
+All landed commits build clean on macOS **and** iOS (`NOOPiOS` scheme); `doc_comment_lint` and
+`i18n_audit --ci` pass; package tests green (`StrandAnalytics` 1519, `WhoopStore` 423,
+`StrandImport` 232/1 skipped). Off-device SQL profiling of one day's 54 h window: **<120 ms** — so the
 71 s `prep` is GRDB row materialisation or the pure-Swift matching, not SQLite. Confirmed dead
 ends: the `(deviceId, ts)` autoindex exists on every hot table; `skinTempFamily` resolves `.whoop5`
 for this owner so the window-wide skin-anchor read is already skipped.
