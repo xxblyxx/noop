@@ -61,6 +61,46 @@ final class AnalyzeRecentConfigSignatureTests: XCTestCase {
         XCTAssertNotEqual(Sig.habitualMidsleepSec(-1_800), Sig.habitualMidsleepSec(1_800))
     }
 
+    // ── baselineState: baseline/spread quantum 0.5, status kept, nValid/nightsSinceUpdate dropped ─────
+    private func base(_ baseline: Double, spread: Double = 8.0, nValid: Int = 40,
+                      nightsSinceUpdate: Int = 0, status: BaselineStatus = .trusted) -> BaselineState {
+        BaselineState(baseline: baseline, spread: spread, nValid: nValid,
+                      nightsSinceUpdate: nightsSinceUpdate, status: status)
+    }
+
+    // The churn this closes: a banked night increments `nValid` and nudges `nightsSinceUpdate`, and the
+    // old `String(describing:)` encoding moved on both — a full cache drop every pass with new sleep data.
+    func testBaselineIgnoresNValidAndStalenessCounters() {
+        XCTAssertEqual(Sig.baselineState(base(52.0, nValid: 40, nightsSinceUpdate: 0)),
+                       Sig.baselineState(base(52.0, nValid: 41, nightsSinceUpdate: 3)))
+    }
+
+    // Sub-quantum drift in the robust EWMA centre/spread (one new night into a long window) is absorbed.
+    // 52.1 and 52.4 both round to step 52; 8.1 and 8.3 both to step 8.
+    func testBaselineAbsorbsSubQuantumDrift() {
+        XCTAssertEqual(Sig.baselineState(base(52.1, spread: 8.1)),
+                       Sig.baselineState(base(52.4, spread: 8.3)))
+    }
+
+    // A genuine multi-night baseline shift — more than a whole quantum — must still invalidate.
+    func testBaselineInvalidatesOnRealDrift() {
+        XCTAssertNotEqual(Sig.baselineState(base(52.1)), Sig.baselineState(base(53.4)))
+        XCTAssertNotEqual(Sig.baselineState(base(52.0, spread: 8.1)),
+                          Sig.baselineState(base(52.0, spread: 9.7)))
+    }
+
+    // `status` gates `usable`/`trusted` — which recovery scoring and ScoreConfidence both key on — so a
+    // status transition at unchanged baseline/spread MUST invalidate. nil is its own stable state.
+    func testBaselineStatusAndNil() {
+        XCTAssertNotEqual(Sig.baselineState(base(52.0, status: .provisional)),
+                          Sig.baselineState(base(52.0, status: .trusted)))
+        XCTAssertNotEqual(Sig.baselineState(base(52.0, status: .trusted)),
+                          Sig.baselineState(base(52.0, status: .stale)))
+        XCTAssertEqual(Sig.baselineState(nil), Sig.baselineState(nil))
+        XCTAssertNotEqual(Sig.baselineState(nil), Sig.baselineState(base(0.0, spread: 0.0,
+                                                                        status: .calibrating)))
+    }
+
     // ── Degenerate Doubles must not trap ──────────────────────────────────────────────────────────────
     // `Int64(_:)` traps on NaN/infinity/out-of-range, and this runs on every analyze pass, so a degenerate
     // upstream value would CRASH rather than mis-cache. The fallback is the exact bit pattern — i.e. the

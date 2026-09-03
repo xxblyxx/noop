@@ -21,6 +21,13 @@ import kotlin.math.roundToLong
  * stale against a real profile change — a correctness regression traded for speed. Rounding to a quantum far
  * below display resolution keeps that invalidation and removes only the re-banking noise.
  *
+ * **`baselines1` had the same shape (#1005-CHURN, 2026-09-03).** `baselines1.hrv` / `baselines1.restingHR`
+ * were folded by `toString()` over the whole `BaselineState`, whose `nValid` count increments on every
+ * banked night — so scoring any fresh night guaranteed a full cache drop on the next pass. [baselineState]
+ * encodes only the fields a cached scan depends on: `baseline` + `spread` quantized, plus the coarse
+ * `status`. `nValid` / `nightsSinceUpdate` are omitted — nothing downstream of a cache hit reads them
+ * except through `status`.
+ *
  * **Signature only.** Nothing here touches what reaches `analyzeDay` — the full-precision values still
  * thread through to scoring unchanged, so no score, tier or displayed number moves.
  *
@@ -39,6 +46,9 @@ object AnalyzeRecentConfigSignature {
     /** Habitual midsleep, to the nearest **5 minutes** — well inside the overnight band's own width. */
     const val HABITUAL_MIDSLEEP_QUANTUM_SEC = 300L
 
+    /** HRV / resting-HR baseline `baseline` and `spread`, to the nearest **1.0 unit** (ms / bpm). */
+    const val BASELINE_FIELD_QUANTUM = 1.0
+
     fun sleepNeedHours(hours: Double): String =
         quantized(hours, SLEEP_NEED_QUANTUM_HOURS) ?: hours.toRawBits().toString()
 
@@ -55,6 +65,18 @@ object AnalyzeRecentConfigSignature {
         val q = HABITUAL_MIDSLEEP_QUANTUM_SEC
         val steps = if (seconds >= 0) (seconds + q / 2) / q else -((-seconds + q / 2) / q)
         return steps.toString()
+    }
+
+    /**
+     * A pass-global HRV or resting-HR baseline, encoded by only the fields a cached day scan depends on:
+     * `baseline` + `spread` quantized, and the coarse `status` (raw). `nValid` / `nightsSinceUpdate` are
+     * deliberately absent — see this object's doc comment. `null` is its own stable state.
+     */
+    fun baselineState(state: BaselineState?): String {
+        if (state == null) return "nil"
+        val b = quantized(state.baseline, BASELINE_FIELD_QUANTUM) ?: state.baseline.toRawBits().toString()
+        val s = quantized(state.spread, BASELINE_FIELD_QUANTUM) ?: state.spread.toRawBits().toString()
+        return "$b:$s:${state.status.raw}"
     }
 
     /**

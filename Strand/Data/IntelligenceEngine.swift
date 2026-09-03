@@ -804,17 +804,25 @@ final class IntelligenceEngine: ObservableObject {
         // The pass config signature — every input that feeds `analyzeDay` but is NOT in the per-day key, so
         // a change to any of them must invalidate every cached night. All are pass-global 28-night / profile
         // / toggle values (stable across an offload storm; they move only on a settings/profile/import edit
-        // or at midnight), so the cache survives the back-to-back passes. baselines1 is signed structurally
-        // (any BaselineState field change ⇒ a different string); Doubles by raw bit-pattern (exact, locale-
-        // free). Only ever compared to itself in memory, so cross-platform string identity isn't required.
+        // or at midnight), so the cache survives the back-to-back passes. Doubles by raw bit-pattern (exact,
+        // locale-free). Only ever compared to itself in memory, so cross-platform string identity isn't
+        // required.
+        //
+        // #1005-CHURN (2026-09-03): `baselines1` was folded by `String(describing:)` over the whole
+        // `BaselineState`, whose `nValid` increments on every banked night — so scoring one fresh night
+        // guaranteed a full cache drop on the NEXT pass (device `819D37A3`: `prep` toggling ~6.5 s ↔ ~71 s).
+        // `AnalyzeRecentConfigSignature.baselineState` now encodes only `baseline`/`spread` (quantized) and
+        // `status` — the fields a cached `DayScan` actually depends on. Same failure the `#1005-CHURN` note
+        // below already fixed for `sleepConsistency`; the `sig changed:` diagnostic named `baselines1.hrv`
+        // as a suspect once before (#1402).
         //
         // #1005-COST: carried as (name, value) PAIRS rather than a bare [String] so a drop can say WHICH
         // component moved (see the `DROPPED` diagnostic below). The joined value is byte-identical to the
         // previous `[String].joined(separator: "|")` — same components, same order, same separator — so
         // this restructure invalidates no cache and changes no behaviour.
         let dayCacheConfigParts: [(name: String, value: String)] = [
-            ("baselines1.hrv", String(describing: baselines1.hrv)),
-            ("baselines1.restingHR", String(describing: baselines1.restingHR)),
+            ("baselines1.hrv", AnalyzeRecentConfigSignature.baselineState(baselines1.hrv)),
+            ("baselines1.restingHR", AnalyzeRecentConfigSignature.baselineState(baselines1.restingHR)),
             ("profile.age", String(up.age.bitPattern)),
             ("profile.sex", up.sex),
             ("profile.stepTicksPerStep", String(up.stepTicksPerStep.bitPattern)),
@@ -882,8 +890,9 @@ final class IntelligenceEngine: ObservableObject {
             // pass reusing 7 of 8 nights), and until now the log said only `reused=0/21` — which cannot
             // distinguish "the pass signature changed" from "per-day eligibility was off for every day".
             // The comment above asserts every component is "stable across an offload storm"; the same claim
-            // was already proven false once for `baselines1` (#1402), and the 2026-08-26 device log shows a
-            // second full cold pass following every launch pass, so the claim is under suspicion again.
+            // was proven false for `baselines1` twice (#1402, then #1005-CHURN 2026-09-03) and once for
+            // `sleepConsistency` — both now encoded to drop their re-banking noise. Keep the attribution:
+            // the next component to churn will announce itself here.
             // NAMES ONLY, never values — a signature component can carry profile data (age, sex).
             // The previous signature is empty only when nothing was loaded from disk either (#1005-WARM
             // restores it on a cold process), which is not a "change" worth attributing — say so instead

@@ -541,10 +541,15 @@ object IntelligenceEngine {
         // change to any of them must invalidate every cached night. All are pass-global 28-night / profile /
         // toggle values (stable across an offload storm; they move only on a settings/profile/import edit or
         // at midnight), so the cache survives the back-to-back passes. Deterministic within-process strings
-        // (compared only to itself in memory, so cross-platform identity isn't required); baselines1 is signed
-        // via its data-class toString (any field change ⇒ a different string).
+        // (compared only to itself in memory, so cross-platform identity isn't required).
+        //
+        // #1005-CHURN (2026-09-03): baselines1 was folded via its data-class toString, whose nValid count
+        // increments on every banked night — so scoring one fresh night guaranteed a full cache drop on the
+        // next pass. AnalyzeRecentConfigSignature.baselineState now encodes only baseline/spread (quantized)
+        // and status. Twin of the Swift fix.
         val dayCacheConfigSig = listOf(
-            baselines1.hrv.toString(), baselines1.restingHR.toString(),
+            AnalyzeRecentConfigSignature.baselineState(baselines1.hrv),
+            AnalyzeRecentConfigSignature.baselineState(baselines1.restingHR),
             profile.age.toString(), profile.sex.toString(), profile.stepTicksPerStep.toString(),
             maxHROverride?.toString() ?: "nil",
             tzOffsetSeconds.toString(),

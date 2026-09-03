@@ -88,6 +88,16 @@ public enum AnalyzeRecentDayCache {
 /// that is safe: outside a trace, neither value feeds anything a cache hit replays. This type's quantizing
 /// functions are unchanged and still used on the trace-on path.
 ///
+/// **`baselines1` had the same shape, found 2026-09-03 (device `819D37A3`).** `baselines1.hrv` /
+/// `baselines1.restingHR` were folded by `String(describing:)` over the whole `BaselineState`, whose
+/// `nValid` count increments on **every** banked night — so scoring any fresh night guaranteed a full
+/// cache drop on the very next pass, measured as `prep` snapping between ~6.5 s (warm) and ~71 s (the
+/// forced cold pass). `baselineState(_:)` below encodes only the fields a cached `DayScan` actually
+/// depends on: `baseline` and `spread` quantized (recovery reads them as `DriverBaseline.mean`/`.spread`,
+/// `ScoreConfidence.charge` reads none of them), plus the coarse `status` enum (the `usable`/`trusted`
+/// cold-start gate `RecoveryScorer` and `ScoreConfidence` both key on). `nValid` and `nightsSinceUpdate`
+/// are omitted precisely because nothing downstream of a cache hit reads them except through `status`.
+///
 /// **Signature-only.** Nothing here touches what reaches `analyzeDay` — the full-precision values still
 /// thread through to scoring unchanged, so no score, tier or displayed number moves. That separation is the
 /// whole safety argument for this change and `AnalyzeRecentConfigSignatureTests` pins it.
@@ -107,6 +117,14 @@ public enum AnalyzeRecentConfigSignature {
     /// Habitual midsleep, to the nearest **5 minutes**. It selects an overnight band; 300 s is well inside
     /// that band's own width.
     public static let habitualMidsleepQuantumSec = 300
+    /// HRV / resting-HR baseline `baseline` and `spread`, to the nearest **1.0 unit** (ms for HRV, bpm
+    /// for RHR — ~2% of a typical baseline, in line with the other quanta here). Recovery's z-score is
+    /// `(value − baseline) / (1.253 × spread)`; at a typical HRV spread of ~8 ms a 1 ms shift moves the
+    /// composite by ~1 point, and a cache entry is only ever minutes-to-hours old before the next pass
+    /// re-scores it anyway — so the bounded staleness is negligible, while a genuine multi-night drift
+    /// still crosses the quantum and invalidates. One `nValid` increment per night is what actually
+    /// churned, and that field is now dropped entirely.
+    public static let baselineFieldQuantum = 1.0
 
     public static func sleepNeedHours(_ hours: Double) -> String {
         quantized(hours, quantum: sleepNeedQuantumHours) ?? String(hours.bitPattern)
@@ -125,6 +143,17 @@ public enum AnalyzeRecentConfigSignature {
         let q = habitualMidsleepQuantumSec
         let steps = seconds >= 0 ? (seconds + q / 2) / q : -((-seconds + q / 2) / q)
         return "\(steps)"
+    }
+
+    /// A pass-global HRV or resting-HR baseline, encoded for the cache signature by only the fields a
+    /// cached `DayScan` depends on: `baseline` + `spread` quantized to `baselineFieldQuantum`, and the
+    /// coarse `status` (raw). `nValid` / `nightsSinceUpdate` are deliberately absent — see this type's
+    /// doc comment. `nil` (no baseline yet, a BLE-only user's first nights) is its own stable state.
+    public static func baselineState(_ state: BaselineState?) -> String {
+        guard let state else { return "nil" }
+        let b = quantized(state.baseline, quantum: baselineFieldQuantum) ?? String(state.baseline.bitPattern)
+        let s = quantized(state.spread, quantum: baselineFieldQuantum) ?? String(state.spread.bitPattern)
+        return "\(b):\(s):\(state.status.rawValue)"
     }
 
     /// The quantum STEP INDEX as a string — never the re-multiplied Double, so there is no float formatting
