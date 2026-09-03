@@ -274,3 +274,63 @@ More → Insights → **Intelligence** → **Recompute** (toolbar), kept in the 
 - [Solving CPU Usage Crashes with Xcode's Energy Organizer](https://swiftrocks.com/debug-cpu-exceptions-xcode-energy-reports) — reading `cpu_resource` reports
 - [Energy Efficiency Guide for iOS Apps: Work Less in the Background](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/WorkLessInTheBackground.html)
 - [Core Bluetooth Background Processing for iOS Apps](https://developer.apple.com/library/archive/documentation/NetworkingInternetWeb/Conceptual/CoreBluetooth_concepts/CoreBluetoothBackgroundProcessingForIOSApps/PerformingTasksWhileYourAppIsInTheBackground.html)
+
+---
+
+# Phase 2 — scoring must not require the app to stay open (2026-09-03)
+
+## Why
+
+Phase 1 verified on a real overnight (zero new CPU kills, `BGProcessingTask` fired twice clean).
+But the owner then tested the intended UX — open NOOP, poke around, lock the phone — and it does not
+work: nothing protects a foreground-started pass from being backgrounded mid-flight, so it either
+runs unchecked into the CPU-metered "Non-Frontmost" state or stalls when the process is suspended.
+
+**Goal, either outcome acceptable:** (1) user opens NOOP, optionally starts something, locks the
+phone — scoring still finishes; or (2) scoring runs fully automatically with no app-open at all.
+
+## What the Phase-2 audit found
+
+- **A real cache-invalidation bug (fixed, `c863218a`).** The pass-global config signature folded
+  `baselines1.hrv`/`baselines1.restingHR` via `String(describing:)` over the whole `BaselineState`,
+  whose `nValid` increments every banked night — so scoring one fresh night wiped the entire 21-day
+  `dayScanCache` on the next pass, forcing a full cold `prep` (~71 s) every time. `baselineState`
+  now encodes only quantized `baseline`/`spread` + `status`; `nValid`/`nightsSinceUpdate` are
+  dropped (nothing downstream of a cache hit reads them except through `status`). Benefits BOTH
+  outcomes: most passes become "N-1 cached + 1 fresh night," well inside any budget.
+- **Graceful-expiry checkpointing was racing suspension (fixed, `86f27c9b`).** The partial-credit
+  machinery existed but `expirationHandler` called `setTaskCompleted` before `analyzeRecent`'s
+  cancelled unwind finished persisting its checkpoint. Now the worker reports completion after the
+  persist, with a bounded fallback. Does NOT help a `cpu_resource_fatal` SIGKILL (nothing unwinds).
+- **`BGContinuedProcessingTask` — deferred, needs an owner decision.** iOS 26's API for "user
+  starts foreground work, then backgrounds, it keeps running with a system progress UI" is the
+  textbook fit for outcome 1, but research surfaced: it is explicitly **user-initiated only** —
+  "silent or speculative use just isn't allowed," with a daemon-level foreground/provenance check —
+  so submitting it from the app's automatic idle-tick/postOffload pass may simply be ignored. It
+  also has multiple unresolved iOS-26-release bugs (launch handler never firing, wildcard-identifier
+  mismatch, `NSInternalInconsistencyException` on submit). And with `c863218a` making a foreground
+  pass short, locking mid-pass may now just survive iOS's post-background grace with no new API.
+  **Decision pending:** measure a post-`c863218a` foreground-then-lock on device first; only then
+  decide whether to (a) wire `BGContinuedProcessingTask` behind an explicit tap (Recompute button /
+  the Sleep scoring banner), (b) rely on the now-short pass finishing inside the grace window, or
+  (c) accept outcome 2 (automatic `BGProcessingTask`, hardened by `c863218a`+`86f27c9b`) as
+  sufficient.
+- **`score`-phase instrumentation (planned commit 3) — not built.** `analyzeDay` is one opaque
+  package call with no seam to split without changing the `StrandAnalytics` API + a Kotlin twin, for
+  a number (~26 s) already under budget and mostly bypassed by cache hits post-`c863218a`. Measure
+  on-device after `c863218a`; instrument `analyzeDay` internals only if the one-fresh-night `score`
+  is still close to budget.
+
+## Status — 2026-09-03
+
+| commit | state |
+|---|---|
+| `c863218a` perf(analyze): baselines1 signature no longer wipes the cache every pass | ✅ done — StrandAnalytics `swift test` 1523 green, macOS + NOOPiOS builds clean |
+| `86f27c9b` fix(analyze): cancelled BG pass persists its checkpoint before suspend | ✅ done — NOOPiOS build clean |
+| `docs/PENDING_VALIDATION.md` — `analyze-baselines1-churn-and-bg-checkpoint` entry | ✅ done, `check-after: 2026-09-04` |
+| commit 3 — `score`-phase split | ⏸ not built (see above) |
+| commit 4 — `BGContinuedProcessingTask` | ⏸ decision pending (see above) |
+
+**Next:** device pull after a morning sync — confirm `dayCache DROPPED — sig changed: baselines1.*`
+stops and `prep=` stays single-digit; then a foreground-then-lock test to see whether the short pass
+survives backgrounding on its own before committing to the fragile new API.

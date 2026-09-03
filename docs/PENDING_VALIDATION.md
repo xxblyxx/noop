@@ -50,6 +50,41 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 
 ## Open
 
+### The baselines1 signature fix stops the every-pass cache wipe, and a cancelled BG pass keeps its checkpoint
+- id: analyze-baselines1-churn-and-bg-checkpoint
+- shipped: `fix/analyze-cost-and-visibility`, commits `c863218a` + `86f27c9b`, 2026-09-03 — pending
+  merge to `main`.
+  - `c863218a` — `AnalyzeRecentConfigSignature.baselineState` encodes `baselines1.hrv` /
+    `baselines1.restingHR` by quantized `baseline`/`spread` (1.0 unit) + `status`, dropping `nValid`
+    and `nightsSinceUpdate`. Those two moved on every banked night, so the pass-global config
+    signature changed every pass and the whole 21-day `dayScanCache` was dropped — forcing a full
+    cold `prep` (~71 s, device `819D37A3`) on every pass that followed a scored night. Kotlin twin
+    written, not compiled locally.
+  - `86f27c9b` — `SyncAnalyzeBackgroundScheduler`'s `expirationHandler` no longer calls
+    `setTaskCompleted` synchronously; the worker reports completion after `operation()` returns and
+    its partial `DayScanCacheStore` checkpoint is on disk, with a bounded 5 s fallback.
+- claim: (a) after a pass scores a fresh night, the NEXT pass reuses the cache instead of dropping it
+  — `analyzeRecent dayCache DROPPED — sig changed: baselines1.*` stops appearing, and warm `prep`
+  stays in single-digit seconds instead of snapping back to ~70 s. (b) a `BGProcessingTask` that iOS
+  expires mid-pass keeps the nights it already scored — the next fire resumes from a smaller cache
+  miss rather than a full cold pass.
+- needs: (a) two analyze passes on-device across a fresh-night boundary — a morning sync that scores
+  last night, then any later pass. (b) a real expired background pass — `noop.analyze.bg.lastOutcome`
+  = `expired` in the plist — followed by a pull that shows the dayScanCache file grew rather than
+  reset.
+- blocked-because: 🟡 needs the device loop. `c863218a` is verified off-device (StrandAnalytics
+  `swift test` green, 1523; macOS + NOOPiOS builds clean) but the churn only reproduces against a
+  real multi-week `dailyMetric` history on the phone. `86f27c9b`'s path only executes when iOS
+  actually expires a `BGProcessingTask`, which is rare and not on-demand.
+- check: pull `com.bly.noop.plist` after a morning sync (recipe: `noop-read-device-prefs` memory),
+  read `strapLog.tail` for `analyzeRecent dayCache …` lines across the two most recent passes and the
+  `analyzeRecent cost prep=…` numbers; and `--domain-type appDataContainer` list
+  `Library/Application Support/noop-dayscan-cache.json` size before/after an expired pass.
+- passes-if: (a) the pass after a scored night logs `reused=N/M` with N close to M and no
+  `sig changed: baselines1.*`, and its `prep=` is < 10 000 ms. (b) after an `expired` outcome, the
+  next fire's `reused=` is non-zero and the dayscan-cache file did not shrink to a cold size.
+- check-after: 2026-09-04
+
 ### The `@82` SpO2 candidate is shown as a track, and still is not a validated percentage
 - id: spo2-candidate-82-timeline
 - shipped: `main` 2026-08-20 (#103) — `Repository.timelineRawMetric` `.spo2` + `FullDayChartView`,
