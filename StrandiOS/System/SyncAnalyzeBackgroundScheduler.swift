@@ -41,15 +41,34 @@ enum SyncAnalyzeBackgroundScheduler {
                 // since the outcome isn't known yet; tightened below if this pass actually scores.
                 scheduleReArm(scored: false)
                 let scored = await operation()
-                guard !Task.isCancelled else { return }
+                // #1005-COST: report completion HERE on both paths — the cancelled one too. When the
+                // `expirationHandler` cancels this worker, `analyzeRecent` unwinds its per-day scan,
+                // writes back the newest nights it did finish, and PERSISTS that partial checkpoint to
+                // `DayScanCacheStore` synchronously before `operation()` returns. So by this line the
+                // checkpoint is on disk and it is safe to tell iOS we're done. The old code called
+                // `completion.finish(success: false)` straight from the `expirationHandler`, which
+                // green-lit suspension immediately and raced that persist — a killed pass then kept
+                // none of its work.
+                guard !Task.isCancelled else {
+                    completion.finish(success: false)
+                    return
+                }
                 BackgroundAnalyzeTelemetry.recordOutcome(scored ? .scored : .noop)
                 if scored { scheduleReArm(scored: true) }
                 completion.finish(success: true)
             }
             task.expirationHandler = {
-                worker.cancel()
                 BackgroundAnalyzeTelemetry.recordOutcome(.expired)
-                completion.finish(success: false)
+                worker.cancel()
+                // Deliberately do NOT `completion.finish()` here — the worker does it above once its
+                // partial checkpoint is persisted. This bounded fallback only fires if that unwind
+                // stalls past the grace iOS gives after `expirationHandler` returns, so the task still
+                // reports done and scheduling isn't frozen. `TaskCompletionGuard` is single-shot, so
+                // whichever call lands first wins and the other is a no-op.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    completion.finish(success: false)
+                }
             }
         }
     }
