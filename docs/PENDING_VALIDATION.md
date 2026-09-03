@@ -338,10 +338,41 @@ difference between "we checked and it held" and "someone got tired of seeing it.
     overnight request. Acceptance: zero new `NOOP*.cpu_resource*` reports (baseline **15**) after an
     overnight with the strap worn and the phone unplugged on waking as usual. Plan:
     `~/.claude/plans/check-my-phone-the-graceful-trinket.md`.
-- check-after: 2026-09-16
-  (bumped from 2026-09-02 — that date's pull is the "2026-09-02 update" above: it answered claim (e)
-  in the negative and redirected the work to `fix/analyze-cost-and-visibility`. Re-check once that
-  branch has shipped and survived one real overnight.
+- **2026-09-03 update — first real overnight on `fix/analyze-cost-and-visibility` (commits through
+  `c1509b79`, installed 2026-09-02 afternoon). Structural fix HOLDS; scoring itself still unmeasured.**
+  Device pull (iPhone `819D37A3`) at 08:30, `--domain-type systemCrashLogs` +
+  `com.bly.noop.plist` + full `strapLog.tail`/`.generations`.
+  - **Zero new `cpu_resource*` reports of any kind overnight.** The file listing still shows exactly
+    the same 16 baseline entries (15 `cpu_resource_fatal` from 08-31/09-01, one non-fatal
+    `cpu_resource` from 2026-09-02 08:29:55, predating this build's install) — nothing dated
+    2026-09-03. Commit `8eda1a36`'s guard did what it was meant to: the idle-tick loop logged
+    `analyze: idle tick skipped — app backgrounded, deferring to BGProcessingTask` dozens of times
+    overnight and never once entered `analyzeRecent` while backgrounded; `Backfill: analyze deferred
+    to BGProcessingTask — app is backgrounded` fired the same way after each background offload.
+  - **The `BGProcessingTask` itself fired twice (05:45:25, 06:45:25) and completed cleanly both
+    times** — `background analyze: scored=false` logged right after each, no crash, no expiry. Not a
+    scoring result: `analyzeIfStale`'s fingerprint gate correctly found nothing new, because the strap
+    hadn't actually reconnected yet at either timestamp — the log around both is wall-to-wall
+    `Discovered WBB5BP0995001 … WHOOP PUFFIN service 1150 detected but unsupported`, a known
+    CoreBluetooth background-scan limitation (overflow-area service data isn't visible to a
+    backgrounded scan, so the app can't identify/connect to an already-known peripheral from
+    advertisement alone) — not a regression from this branch's changes.
+  - **The real overnight data only landed at 08:16–08:18**, minutes before this pull — a full
+    historical offload (`reached the end of available history (trim=0xFFFFFFFF)`), presumably once
+    the phone was actually handled on waking. `noop.analyzeWatermark` is still **2026-09-02 18:23:58**
+    (before last night's sleep even started) and no `analyzeRecent`/`re-score:` line exists anywhere
+    in the current session's tail or generations — so **last night has not been scored yet**, and the
+    `#1005-COST` `prep-split hrRead=/otherReads=/match=` instrumentation from `d4225454` has not fired
+    at all this session. That reading is still outstanding.
+  - **Net for today:** the crash-avoidance goal (item 1 of the plan's Goal section) looks met on this
+    one night; the cost-reduction goal (item 2, and the actual `prep` fix this whole branch is
+    building toward) is still unmeasured — need either the next discretionary `BGProcessingTask` fire
+    or a foreground Recompute to capture a `prep-split` line against this build.
+- check-after: 2026-09-04
+  (bumped from 2026-09-02 — the "2026-09-02 update" answered claim (e) and redirected to
+  `fix/analyze-cost-and-visibility`; the "2026-09-03 update" above confirms zero CPU kills on that
+  branch's first real overnight but still needs a `prep-split` reading to close claims (d)/(f). Kept
+  short (not 2026-09-16) because this is actively being iterated day to day this week.
   Earlier note, still in force: bumped 2026-08-28 → 2026-09-02 with no new device pull recorded against the original
   three items below. What is still owed, unchanged: the CPU/pass-count half re-measured once the
   follow-up floor fix lands; one eyes-on morning sync for the progress bar; and the narrower
