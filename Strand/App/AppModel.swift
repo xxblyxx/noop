@@ -833,7 +833,24 @@ final class AppModel: ObservableObject {
         // would sit at some stale fraction forever on the next real sync.
         defer { syncProgress.finish() }
         live.append(log: "Backfill: refreshing dashboard cache from completed sync")
+        // #1005-COST follow-up (2026-09-03 night): three cpu_resource_fatal kills in one evening
+        // (22:18, 22:47, 23:17 — same "Non-Frontmost … Requested Thread QoS Utility, e-core"
+        // fingerprint as the original 15), with NO `re-score:`/`analyzeRecent cost` line for two of the
+        // three — i.e. NOT `analyzeRecent`, which the `isRunningInBackground` branch below already
+        // guards. This call is the one piece of this function's work that is NEVER gated on background
+        // state and has its own `Task.detached(priority: .utility)` (`Repository.refresh`) — matching
+        // the crash fingerprint — and the comment below calls it "cheap" without ever having measured
+        // it. It runs on EVERY completed offload (frequent while the strap streams) and from the
+        // `deferredRescoreDueAt` floor-retry sink (`init()`, every ~15–30 min), and "today" is the one
+        // day in its 120-day window that grows all day (never cacheable, live HR keeps extending it) —
+        // so a call that was fine at 8 AM may not be by 11 PM. Timed here, not fixed, until a device
+        // pull confirms whether this is actually the culprit.
+        let tRepoRefresh0 = Date()
         await repo.refresh(days: 120)
+        let repoRefreshMs = Int(Date().timeIntervalSince(tRepoRefresh0) * 1000)
+        if repoRefreshMs > 2000 {
+            live.append(log: "Backfill: repo.refresh(days:120) cost \(repoRefreshMs)ms (backgrounded=\(isRunningInBackground))")
+        }
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute
         // analyzeRecent tick , otherwise a just-synced night's Charge / Effort / Rest can take up to
         // 15 minutes to appear on a strap-only (no-import) dashboard. analyzeRecent no-ops if a tick is
