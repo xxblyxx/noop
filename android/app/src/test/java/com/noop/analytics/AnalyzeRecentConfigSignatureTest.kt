@@ -64,47 +64,6 @@ class AnalyzeRecentConfigSignatureTest {
         assertNotEquals(sig.habitualMidsleepSec(-1_800L), sig.habitualMidsleepSec(1_800L))
     }
 
-    // ── baselineState: baseline/spread quantum 0.5, status kept, nValid/nightsSinceUpdate dropped ────
-    private fun base(
-        baseline: Double, spread: Double = 8.0, nValid: Int = 40,
-        nightsSinceUpdate: Int = 0, status: BaselineStatus = BaselineStatus.TRUSTED,
-    ) = BaselineState(baseline, spread, nValid, nightsSinceUpdate, status)
-
-    // The churn this closes: a banked night increments nValid and nudges nightsSinceUpdate, and the old
-    // toString() encoding moved on both — a full cache drop every pass with new sleep data.
-    @Test fun baselineIgnoresNValidAndStalenessCounters() {
-        assertEquals(
-            sig.baselineState(base(52.0, nValid = 40, nightsSinceUpdate = 0)),
-            sig.baselineState(base(52.0, nValid = 41, nightsSinceUpdate = 3)),
-        )
-    }
-
-    // 52.1 and 52.4 both round to step 52; 8.1 and 8.3 both to step 8.
-    @Test fun baselineAbsorbsSubQuantumDrift() {
-        assertEquals(sig.baselineState(base(52.1, spread = 8.1)), sig.baselineState(base(52.4, spread = 8.3)))
-    }
-
-    @Test fun baselineInvalidatesOnRealDrift() {
-        assertNotEquals(sig.baselineState(base(52.1)), sig.baselineState(base(53.4)))
-        assertNotEquals(sig.baselineState(base(52.0, spread = 8.1)), sig.baselineState(base(52.0, spread = 9.7)))
-    }
-
-    @Test fun baselineStatusAndNull() {
-        assertNotEquals(
-            sig.baselineState(base(52.0, status = BaselineStatus.PROVISIONAL)),
-            sig.baselineState(base(52.0, status = BaselineStatus.TRUSTED)),
-        )
-        assertNotEquals(
-            sig.baselineState(base(52.0, status = BaselineStatus.TRUSTED)),
-            sig.baselineState(base(52.0, status = BaselineStatus.STALE)),
-        )
-        assertEquals(sig.baselineState(null), sig.baselineState(null))
-        assertNotEquals(
-            sig.baselineState(null),
-            sig.baselineState(base(0.0, spread = 0.0, status = BaselineStatus.CALIBRATING)),
-        )
-    }
-
     // ── Degenerate Doubles must not alias ───────────────────────────────────────────────────────────
     // Kotlin's roundToLong() SATURATES on NaN/infinity rather than throwing, which would collapse every
     // non-finite value onto the same step and alias distinct states. The guard falls back to raw bits.

@@ -543,13 +543,16 @@ object IntelligenceEngine {
         // at midnight), so the cache survives the back-to-back passes. Deterministic within-process strings
         // (compared only to itself in memory, so cross-platform identity isn't required).
         //
-        // #1005-CHURN (2026-09-03): baselines1 was folded via its data-class toString, whose nValid count
-        // increments on every banked night — so scoring one fresh night guaranteed a full cache drop on the
-        // next pass. AnalyzeRecentConfigSignature.baselineState now encodes only baseline/spread (quantized)
-        // and status. Twin of the Swift fix.
+        // #1005-CHURN (2026-09-03, corrected 2026-09-04): baselines1 was folded via its data-class
+        // toString, whose nValid increments on every banked night — so scoring one fresh night guaranteed
+        // a full cache drop on the next pass. Quantizing it removed that but not the real churn: the
+        // trailing fold drifts past any sane quantum most nights. Twin of the Swift fix.
         val dayCacheConfigSig = listOf(
-            AnalyzeRecentConfigSignature.baselineState(baselines1.hrv),
-            AnalyzeRecentConfigSignature.baselineState(baselines1.restingHR),
+            // #1005-CHURN (corrected 2026-09-04): baselines1 is not a cache input — pass 2 recomputes
+            // every baseline-derived field from baselines2, so a cached scan replays nothing it could
+            // have changed. Constant sentinel, same treatment as the two sleep values below. Twin of the
+            // Swift fold.
+            "off", "off",
             profile.age.toString(), profile.sex.toString(), profile.stepTicksPerStep.toString(),
             maxHROverride?.toString() ?: "nil",
             tzOffsetSeconds.toString(),

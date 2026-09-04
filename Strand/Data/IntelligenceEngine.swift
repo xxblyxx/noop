@@ -821,21 +821,35 @@ final class IntelligenceEngine: ObservableObject {
         // locale-free). Only ever compared to itself in memory, so cross-platform string identity isn't
         // required.
         //
-        // #1005-CHURN (2026-09-03): `baselines1` was folded by `String(describing:)` over the whole
-        // `BaselineState`, whose `nValid` increments on every banked night — so scoring one fresh night
-        // guaranteed a full cache drop on the NEXT pass (device `819D37A3`: `prep` toggling ~6.5 s ↔ ~71 s).
-        // `AnalyzeRecentConfigSignature.baselineState` now encodes only `baseline`/`spread` (quantized) and
-        // `status` — the fields a cached `DayScan` actually depends on. Same failure the `#1005-CHURN` note
-        // below already fixed for `sleepConsistency`; the `sig changed:` diagnostic named `baselines1.hrv`
-        // as a suspect once before (#1402).
+        // #1005-CHURN (2026-09-03, corrected 2026-09-04): `baselines1` is NOT a cache input at all — fold a
+        // constant sentinel, exactly as `sleepNeedHours`/`sleepConsistency` below already do, and for the
+        // identical reason: nothing downstream of a cache hit ever reads it.
+        //
+        // Everything `baselines1` influences is recomputed in PASS 2 from `baselines2` — a different fold,
+        // re-taken after pass 1 harvests this pass's nights: `recomputeRecovery`, `recomputeSkinTempDev`,
+        // `recomputeChargeDrivers` and `ScoreConfidence.charge` (all at `:1925-1943`) overwrite every
+        // baseline-derived field a cached `DayScan` carries. The scan loop's own note says as much — "every
+        // field except recovery is baseline-independent, so pass 2 only re-scores the cheap recovery
+        // composite" (`:698`). So a cached day replays nothing that `baselines1` could have changed.
+        //
+        // The first attempt (2026-09-03) only QUANTIZED it — `baseline`/`spread` to 1.0 units plus `status`
+        // — which fixed the guaranteed-every-pass churn from `nValid` incrementing, but left a real one:
+        // the trailing fold genuinely drifts past a 1.0 quantum most nights, so the whole 21-day cache was
+        // still being thrown away roughly daily. Measured: two warm passes 8.3 s apart on 2026-09-03, then
+        // `dayCache DROPPED — sig changed: baselines1.hrv,baselines1.restingHR` at 04:52 the next morning
+        // and a full cold pass behind it. Quantizing treats a value as a cache input that merely moves
+        // slowly; the honest reading is that this one is not a cache input at all.
+        //
+        // Kept at fixed POSITIONS in this list (as `"off"`, like its two neighbours) so the positional
+        // `sig changed:` attribution below stays correct without a disk-format change.
         //
         // #1005-COST: carried as (name, value) PAIRS rather than a bare [String] so a drop can say WHICH
         // component moved (see the `DROPPED` diagnostic below). The joined value is byte-identical to the
         // previous `[String].joined(separator: "|")` — same components, same order, same separator — so
         // this restructure invalidates no cache and changes no behaviour.
         let dayCacheConfigParts: [(name: String, value: String)] = [
-            ("baselines1.hrv", AnalyzeRecentConfigSignature.baselineState(baselines1.hrv)),
-            ("baselines1.restingHR", AnalyzeRecentConfigSignature.baselineState(baselines1.restingHR)),
+            ("baselines1.hrv", "off"),
+            ("baselines1.restingHR", "off"),
             ("profile.age", String(up.age.bitPattern)),
             ("profile.sex", up.sex),
             ("profile.stepTicksPerStep", String(up.stepTicksPerStep.bitPattern)),
