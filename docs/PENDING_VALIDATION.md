@@ -50,6 +50,40 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 
 ## Open
 
+### Background analyze converges across fires instead of restarting, and the stage breadcrumbs say where it dies
+- id: analyze-background-converges
+- shipped: `fix/background-analyze-converges`, commits `d672c960`, `34f44685`, `a13fd52d`,
+  `bd07103a`, `e213da7d`, `fc3ef8f4`, 2026-09-04 — pending merge to `main`.
+- claim: on a device where `BGProcessingTask` fires are granted but the process does not survive a
+  whole pass, sleep still gets scored **without the app being opened**, because (a) a fire that is
+  cut off banks the days it did scan (`a13fd52d` checkpoints the day-scan cache mid-loop) and the
+  next fire resumes from there, and (b) a truncated pass now re-arms in 15 min rather than 60
+  (`bd07103a`), so successive fires converge rather than repeating hourly forever. Supporting:
+  `d672c960` stops a truncated pass destroying data outside the span it scored — including the
+  day-scan cache itself, which would otherwise defeat (a); `fc3ef8f4` stops a background pass
+  spawning a second unbudgeted full-width pass; `e213da7d` takes the cache file I/O off the main
+  actor.
+- needs: one overnight with the strap worn and **the app never opened**, on a build carrying all six.
+  The failure this fixes only appears when iOS terminates the process mid-pass without cancelling —
+  it cannot be reproduced on the simulator or by foregrounding.
+- blocked-because: 🟡 needs the device loop. Everything here is verified off-device (both app targets
+  build; `BackgroundAnalyzeSchedulePolicyTests` green, 6 tests, 3 new) but the whole point is
+  behaviour under an iOS termination that gives no notice, which nothing local can produce.
+- check: morning pull of `com.bly.noop.plist` (recipe: `noop-read-device-prefs` memory), plus a direct
+  read of `sleepSession` from the store (`noop-device-crashlogs` memory has the `devicectl` form) and
+  the crash-log listing.
+- passes-if: **(1)** `noop.analyze.bg.lastStage` is present and NEWER than `lastOutcomeAt` if the pass
+  died, or advanced to `pass2Finished`/`returned` if it completed — either way it names the step,
+  which is the single most informative new signal and the thing that makes the next iteration
+  possible. **(2)** `lastOutcome` is current rather than frozen at the prior evening; a reading of
+  `truncated` is a PASS, not a failure — it means the fire banked work and re-armed short.
+  **(3)** `noop.analyze.lastPassEndedAt` has advanced past the night. **(4)** a `sleepSession` row
+  exists for the night, `source=computed`, with the app never opened. **(5)** zero new
+  `NOOP*.cpu_resource*` reports — baseline 21 files, newest `2026-09-04-002006`.
+  If (1) advances but (3)/(4) do not, that is still forward progress: the stage names the next thing
+  to attack, which is why it shipped alongside rather than after.
+- check-after: 2026-09-05
+
 ### The baselines1 signature fix stops the every-pass cache wipe, and a cancelled BG pass keeps its checkpoint
 - id: analyze-baselines1-churn-and-bg-checkpoint
 - shipped: `fix/analyze-cost-and-visibility`, commits `c863218a` + `86f27c9b`, 2026-09-03 — pending

@@ -51,3 +51,35 @@ wEfficiency=0.20 wRestorative=0.20 wConsistency=0.10`):
   (`docs/CONTRIBUTING.md` §"Derive a physiological signal") and a Kotlin twin, not a quick tweak.
 - Confirm with the owner whether a ~95 practical ceiling is actually undesirable, or just
   under-explained on screen (a copy/tooltip fix would be much cheaper than a scoring change).
+
+## analyze-pass-mainthread-and-query-costs (2026-09-04)
+
+Surfaced while fixing the background-analyze convergence problem
+(`docs/superpowers/plans/2026-09-02-analyze-cost-and-visibility.md`, Phase 3). Real, deliberately not
+fixed in that branch — each needs its own measurement first.
+
+**1. `hrFingerprint()` is an unindexed whole-store `COUNT(*)`.** `Packages/WhoopStore/.../Reads.swift`
+counts `hrSample` with no `deviceId` filter, and `IntelligenceEngine.analyzeRecent` calls it as the
+FIRST thing every pass does (`:567`-ish) — before any gating. It runs through `syncRead` on the
+`WhoopStore` actor, so it also serialises against every in-flight BLE ingest write. On a
+multi-million-row table that is a strong suspect for a slow pass start, and it is on the critical path
+of every background fire. Not touched because it backs the freshness gate: changing what it counts
+changes when passes are skipped, so it wants a measurement and a correctness argument of its own, not
+a drive-by. Time it first (the `#1005-COST` tally is the house pattern).
+
+**2. `registry.all()` / `registry.activeDeviceId()` block the main actor.** `IntelligenceEngine.swift`
+`:712-713` calls both synchronously with no `await`; `DeviceRegistryStore` is a plain `dbQueue.read`
+and `registryWriter` is `nonisolated`, so these are blocking GRDB reads on the MainActor. Left alone
+because `DeviceRegistry` is a non-Sendable `ObservableObject` — hopping it across an actor boundary is
+a genuine hazard, and the reads are once-per-pass against a tiny table, so the risk/benefit is much
+worse than the `DayScanCacheStore` I/O that WAS moved in `e213da7d`. Wants either a Sendable snapshot
+type or an async accessor on the registry.
+
+**3. A narrow `maxDays` for background passes — DO NOT implement naively.** Tempting (it shrinks both
+the scan loop and pass 2, since `oldestDay` derives from `maxDays`) and it was in the Phase 3 plan
+until review killed it. The landmine: the cache prune at `IntelligenceEngine.swift:1545`-ish filters
+`dayScanCacheLocal` to the pass's own window before it is persisted, so a 3-day background pass would
+write back a 3-day cache and leave the next foreground 21-day pass cold for 18 days — strictly worse
+than doing nothing. It also buys less than it looks: narrowing removes the nearly-free cache hits, not
+the one expensive freshly-scored day, which is precisely last night. If revisited, widen the prune (or
+skip the persist entirely on a narrowed pass) FIRST.

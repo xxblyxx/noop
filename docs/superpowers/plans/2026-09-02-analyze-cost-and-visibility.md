@@ -277,60 +277,378 @@ More → Insights → **Intelligence** → **Recompute** (toolbar), kept in the 
 
 ---
 
-# Phase 2 — scoring must not require the app to stay open (2026-09-03)
+# Phase 2 — scoring must not require the app to stay open
 
-## Why
+## Context
 
-Phase 1 verified on a real overnight (zero new CPU kills, `BGProcessingTask` fired twice clean).
-But the owner then tested the intended UX — open NOOP, poke around, lock the phone — and it does not
-work: nothing protects a foreground-started pass from being backgrounded mid-flight, so it either
-runs unchecked into the CPU-metered "Non-Frontmost" state or stalls when the process is suspended.
+Phase 1 shipped and was verified on a real overnight (2026-09-03): zero new `cpu_resource_fatal`
+kills, the `BGProcessingTask` fired twice and completed cleanly, and a foreground pass correctly
+scored a fresh night in ~49 s. But the owner then tested the actual desired UX — open NOOP, poke
+around, lock the phone — and it does **not** work: nothing protects a foreground-started pass from
+being backgrounded mid-flight, so it either keeps running unchecked into the CPU-metered
+"Non-Frontmost" state (the same kill Phase 1 fixed for the BLE-wake path) or stalls if the process
+gets suspended first.
 
-**Goal, either outcome acceptable:** (1) user opens NOOP, optionally starts something, locks the
-phone — scoring still finishes; or (2) scoring runs fully automatically with no app-open at all.
+**Non-negotiable goal, either outcome acceptable:**
+1. User opens NOOP, optionally starts something, then locks the phone or switches away — scoring
+   finishes correctly regardless.
+2. Scoring runs fully automatically — strap reconnects, offloads, scores — with no app-open at all.
 
-## What the Phase-2 audit found
+Today satisfies neither: scoring only reliably completes if the app stays foregrounded, unlocked,
+until the "Scoring last night from your strap…" banner clears.
 
-- **A real cache-invalidation bug (fixed, `c863218a`).** The pass-global config signature folded
-  `baselines1.hrv`/`baselines1.restingHR` via `String(describing:)` over the whole `BaselineState`,
-  whose `nValid` increments every banked night — so scoring one fresh night wiped the entire 21-day
-  `dayScanCache` on the next pass, forcing a full cold `prep` (~71 s) every time. `baselineState`
-  now encodes only quantized `baseline`/`spread` + `status`; `nValid`/`nightsSinceUpdate` are
-  dropped (nothing downstream of a cache hit reads them except through `status`). Benefits BOTH
-  outcomes: most passes become "N-1 cached + 1 fresh night," well inside any budget.
-- **Graceful-expiry checkpointing was racing suspension (fixed, `86f27c9b`).** The partial-credit
-  machinery existed but `expirationHandler` called `setTaskCompleted` before `analyzeRecent`'s
-  cancelled unwind finished persisting its checkpoint. Now the worker reports completion after the
-  persist, with a bounded fallback. Does NOT help a `cpu_resource_fatal` SIGKILL (nothing unwinds).
-- **`BGContinuedProcessingTask` — deferred, needs an owner decision.** iOS 26's API for "user
-  starts foreground work, then backgrounds, it keeps running with a system progress UI" is the
-  textbook fit for outcome 1, but research surfaced: it is explicitly **user-initiated only** —
-  "silent or speculative use just isn't allowed," with a daemon-level foreground/provenance check —
-  so submitting it from the app's automatic idle-tick/postOffload pass may simply be ignored. It
-  also has multiple unresolved iOS-26-release bugs (launch handler never firing, wildcard-identifier
-  mismatch, `NSInternalInconsistencyException` on submit). And with `c863218a` making a foreground
-  pass short, locking mid-pass may now just survive iOS's post-background grace with no new API.
-  **Decision pending:** measure a post-`c863218a` foreground-then-lock on device first; only then
-  decide whether to (a) wire `BGContinuedProcessingTask` behind an explicit tap (Recompute button /
-  the Sleep scoring banner), (b) rely on the now-short pass finishing inside the grace window, or
-  (c) accept outcome 2 (automatic `BGProcessingTask`, hardened by `c863218a`+`86f27c9b`) as
-  sufficient.
-- **`score`-phase instrumentation (planned commit 3) — not built.** `analyzeDay` is one opaque
-  package call with no seam to split without changing the `StrandAnalytics` API + a Kotlin twin, for
-  a number (~26 s) already under budget and mostly bypassed by cache hits post-`c863218a`. Measure
-  on-device after `c863218a`; instrument `analyzeDay` internals only if the one-fresh-night `score`
-  is still close to budget.
+## What a device-code audit + fresh research turned up
 
-## Status — 2026-09-03
+**A real cache-invalidation bug, found while tracing why `prep` cost 71 s once and 6.5 s another
+time — the same day, same app, same code.** `AnalyzeRecentConfigSignature` (assembled in
+`IntelligenceEngine.swift:815-856`) folds 17 pass-global inputs into one string; a mismatch against
+the previous pass's signature wipes the **entire persisted 21-day `dayScanCache`**
+(`noop-dayscan-cache.json`, `Strand/Data/DayScanCacheStore.swift`), forcing every day to re-`prep`
+from scratch. Two of those 17 inputs — `baselines1.hrv` and `baselines1.restingHR`
+(`IntelligenceEngine.swift:823-824`) — are raw, full-precision floats, unlike `sleepNeedHours`
+(quantized to 0.25 h), `sleepConsistency` (0.01), and `habitualMidsleepSec` (300 s) right next to
+them. `baselines1` is a trailing fold over the *entire* `dailyMetric` history
+(`store.dailyMetrics(... "0000-01-01" ... "9999-12-31")` → `Baselines.foldHistory`); **scoring any
+single fresh night moves that fold by some tiny amount, which changes the signature, which wipes the
+whole cache on the very next pass.** The code already voices this exact suspicion
+(`IntelligenceEngine.swift:884-887`, "a second full cold pass following every launch pass"), and the
+diagnostic line to confirm it already exists (`dayCache DROPPED — sig changed: baselines1.hrv`) —
+just never checked. This is present **identically** in the Android twin
+(`android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt:547`, same unquantized
+`baselines1.hrv.toString()` treatment). Fixing this benefits **both** outcomes: nearly every real
+pass becomes "N-1 cached days (near-free) + 1 genuinely new night," not a full 21-day cold pass.
 
-| commit | state |
-|---|---|
-| `c863218a` perf(analyze): baselines1 signature no longer wipes the cache every pass | ✅ done — StrandAnalytics `swift test` 1523 green, macOS + NOOPiOS builds clean |
-| `86f27c9b` fix(analyze): cancelled BG pass persists its checkpoint before suspend | ✅ done — NOOPiOS build clean |
-| `docs/PENDING_VALIDATION.md` — `analyze-baselines1-churn-and-bg-checkpoint` entry | ✅ done, `check-after: 2026-09-04` |
-| commit 3 — `score`-phase split | ⏸ not built (see above) |
-| commit 4 — `BGContinuedProcessingTask` | ⏸ decision pending (see above) |
+**Partial-credit checkpointing for the `BGProcessingTask` path already exists** and is more mature
+than Phase 1 assumed — `SyncAnalyzeBackgroundScheduler`'s `expirationHandler` cancels the worker,
+which persists whatever it scored (newest-night-first) to the on-disk day-scan cache
+(`IntelligenceEngine.swift:1570-1595`). Two real gaps: (a) `setTaskCompleted` is reported
+**synchronously inside the expiration handler**, before the persist at `:1586` — a race against
+suspension; (b) a `cpu_resource_fatal` **SIGKILL is not a cancellation** — nothing unwinds or
+persists, so this checkpointing only helps the graceful-expiry case, never the actual crash Phase 1
+was built around.
 
-**Next:** device pull after a morning sync — confirm `dayCache DROPPED — sig changed: baselines1.*`
-stops and `prep=` stays single-digit; then a foreground-then-lock test to see whether the short pass
-survives backgrounding on its own before committing to the fragile new API.
+**No `beginBackgroundTask` assertion exists anywhere** in the app — confirmed by exhaustive grep.
+Nothing extends the OS grace period after backgrounding today, and `isRunningInBackground`
+(`AppModel.swift:758`) is only checked at the *start* of a pass, never mid-flight — so a pass that
+was safely foreground when it started keeps running, unprotected, straight into the CPU monitor the
+instant the user locks the phone.
+
+**Research: `beginBackgroundTask` doesn't solve this even if added.** It extends *how long before
+suspension*, not the CPU-time ceiling — a "Non-Frontmost" process is still subject to the 80%/60 s
+monitor whether or not it holds that assertion (no source confirms an exemption). **iOS 26's
+`BGContinuedProcessingTask`** is the API actually built for "foreground work started by the user
+that must survive backgrounding," with a system-provided progress UI, and is very likely exempt from
+the ordinary Non-Frontmost throttle (it's explicitly designed for open-ended work like video
+exports, which the 48 s budget could never accommodate). But it's new and has real, currently
+unresolved rough edges:
+- A live Apple daemon bug (`developer.apple.com/forums/thread/807370`, iOS 26.1+): `submit()` can
+  report success while the launch handler silently never fires (`duet` fails to recognize the app as
+  foregrounded). Apple's own DTS-recommended fix: **never gate starting the actual work on the
+  task's callback** — start work immediately regardless, submit the continued-processing request in
+  parallel purely to extend runtime + get the progress UI, with a short fallback timer.
+- `submit(_:)` is deprecated; use `submitTaskRequest(_:completionHandler:)`, which actually
+  surfaces submission failures.
+- A separate reported bug with **wildcard** identifiers not matching correctly. NOOP only ever runs
+  one scoring pass at a time, so the plan uses a single **fixed** identifier and sidesteps this.
+- Requires an explicit user-initiated trigger per Apple's guidance (no hard runtime enforcement
+  found, but treated as a real constraint) — satisfied here because submission is triggered by the
+  same foreground pass-start decision the app already makes only when the user has the app open.
+
+## Approach
+
+1. **Fix the `baselines1` signature churn (load-bearing, both outcomes).** Add
+   `AnalyzeRecentConfigSignature.hrvBaseline1(_:)` / `.restingHRBaseline1(_:)` quantizers
+   (`Packages/StrandAnalytics/Sources/StrandAnalytics/AnalyzeRecentDayCache.swift`, next to the
+   existing three) — proposed quanta: **1.0 ms** for HRV, **1.0 bpm** for resting HR (tunable; the
+   file's own doc already states the tradeoff: "a value drifting across a quantum boundary still
+   invalidates — that degrades to exactly today's behaviour, never to a wrong score"). Wire them into
+   the signature at `IntelligenceEngine.swift:823-824`, replacing the raw floats. Extend
+   `AnalyzeRecentConfigSignatureTests.swift` with the same "unchanged within quantum ⇒ signature
+   unchanged" + "still invalidates on genuine drift" shape already used for the other three.
+   **Kotlin twin same commit** (`android/.../analytics/AnalyzeRecentConfigSignature.kt` +
+   `IntelligenceEngine.kt:547`), written but not compiled locally, per `CLAUDE.md`. Signature-only —
+   no score, tier, or displayed number changes, so this needs no `PENDING_VALIDATION.md` entry of its
+   own for correctness, but DOES need one for "does the churn actually stop" (see Verification).
+
+2. **Fix the checkpoint-vs-suspend race.** In `SyncAnalyzeBackgroundScheduler.swift`'s
+   `expirationHandler` (`:50-54`, `:110-114`), don't call `setTaskCompleted` until the cancelled
+   worker's persist (`IntelligenceEngine.swift:1586`) has actually run — await it with a short,
+   bounded grace (a few seconds; iOS gives some slack after `expirationHandler` fires before it
+   force-kills). Small, contained change to an already-correct mechanism.
+
+3. **Instrument the `score` phase the way `d4225454` did for `prep`.** One fresh night still costs
+   ~26 s of `score` (measured 2026-09-03) — under budget alone, but worth knowing where it goes
+   before deciding whether it needs its own fix, the same "instrument first" discipline Phase 1
+   used for `prep`. Add a coarse split (e.g. stager vs. recovery/effort scoring) to the existing
+   `analyzeRecent cost prep=… score=…` log line. No behavior change.
+
+4. **Wire `BGContinuedProcessingTask` for the open-then-lock flow (outcome 1).**
+   - `project.yml`: add `$(PRODUCT_BUNDLE_IDENTIFIER).analyzeContinued` to
+     `BGTaskSchedulerPermittedIdentifiers` (no new `UIBackgroundModes` value — `processing` is
+     already declared and granted). Comment the fixed-identifier decision (no wildcard) and the
+     precedent that a *new* background-mode capability needed a fresh install
+     (`git show 3f434482`) — this change only appends to an already-provisioned array, so try an
+     ordinary upgrade install first (see Verification's data-safety note before escalating).
+   - New `@available(iOS 26.0, *)`-gated controller (new file under `StrandiOS/System/`, sibling to
+     `SyncAnalyzeBackgroundScheduler.swift`) that registers the task at launch
+     (`StrandiOSApp.swift`, alongside the existing `.analyze`/`.debugexport`/`.healthwriteback`
+     registration) and is invoked from the *existing* foreground pass-start decisions —
+     `AppModel.swift:546` (idle-tick) and `:881` (postOffload) — submitting the request via
+     `submitTaskRequest(_:completionHandler:)` in parallel with (never gating) the
+     `analyzeRecent` call already made there. Title/subtitle driven off `intelligence.computing`
+     and the day count being scored; progress from whatever coarse per-day signal the loop already
+     has. On iOS < 17.0...26.0 (deployment target is 17.0), this is simply skipped — today's
+     foreground-only behavior is the fallback, not a stub, since it's the exact behavior that
+     already ships.
+   - Deliberately **not** using `beginBackgroundTask` as a supplement — research above found no
+     evidence it changes CPU-monitor exposure, so it would add complexity without closing the actual
+     gap.
+
+5. **`docs/PENDING_VALIDATION.md`**: one new entry for this phase's claim-set — the baselines1 fix
+   (does `dayCache DROPPED — sig changed: baselines1.*` stop appearing after a scored night?) and
+   the `BGContinuedProcessingTask` path (does scoring actually complete after the user opens NOOP
+   and locks the phone, and does the identifier get registered on an upgrade install or need a
+   fresh one?). `check-after` should be very short (this week), matching the existing 2026-09-04
+   entry's cadence.
+
+## Files
+
+- `Packages/StrandAnalytics/Sources/StrandAnalytics/AnalyzeRecentDayCache.swift` — new quantizers,
+  next to `sleepNeedHours`/`sleepConsistency`/`habitualMidsleepSec` (`:104-128`)
+- `Packages/StrandAnalytics/Tests/StrandAnalyticsTests/AnalyzeRecentConfigSignatureTests.swift`
+- `Strand/Data/IntelligenceEngine.swift` — `:823-824` signature inputs, `:884-887` the existing
+  suspicion comment to resolve, `:1586` the persist the race-fix must wait on
+- `android/app/src/main/java/com/noop/analytics/AnalyzeRecentConfigSignature.kt`,
+  `IntelligenceEngine.kt:547` — Kotlin twin, written but not compiled locally
+- `StrandiOS/System/SyncAnalyzeBackgroundScheduler.swift` — `:50-54`/`:110-114` the race fix
+- `StrandiOS/System/` — new `BGContinuedProcessingTask` controller file
+- `StrandiOS/App/StrandiOSApp.swift` — new task registration alongside the existing three
+- `Strand/App/AppModel.swift` — `:546`, `:881` the two submission call sites
+- `project.yml` — new `BGTaskSchedulerPermittedIdentifiers` entry
+- `docs/PENDING_VALIDATION.md`
+
+## Verification
+
+- `cd Packages/StrandAnalytics && swift test` — green, including the new signature tests.
+- Build iOS by hand (CI doesn't cover app targets): `xcodegen generate && xcodebuild -project
+  Strand.xcodeproj -scheme NOOPiOS -destination 'id=<device>' -derivedDataPath build-device
+  -allowProvisioningUpdates build`.
+- **⚠️ Data-safety step before any reinstall attempt:** NOOP's SQLite store has no cloud backup —
+  a full uninstall erases months of already-decoded strap history the strap itself no longer holds.
+  Try an ordinary upgrade install first. Only if the new `BGContinuedProcessingTask` identifier
+  isn't accepted (verify via a registration-success log or the task simply never appearing in device
+  diagnostics) escalate to a full reinstall, and **only after** backing up
+  `Library/Application Support/OpenWhoop/whoop.sqlite{,-wal,-shm}` and the prefs plist via the
+  existing `devicectl device copy from` recipe (`noop-read-device-prefs` / `noop-device-crashlogs`
+  memories) — this session's tooling already does this.
+- **Cache-churn check:** pull the plist after a pass that scored a fresh night, then another pass
+  right after. Before the fix: `dayCache DROPPED — sig changed: baselines1.*` on the second pass.
+  After: the second pass should show a high `reused=` count instead.
+- **Outcome 1 end-to-end:** open NOOP, let a pass start (banner appears), lock the phone before it
+  finishes, wait, then pull crash logs + the plist — expect **no new `cpu_resource_fatal`**,
+  `lastPassEndedAt` advancing, and (if `BGContinuedProcessingTask` registered successfully) system
+  background-task diagnostics showing the identifier ran.
+- **Outcome 2 end-to-end (unchanged from Phase 1):** overnight, strap worn, phone unplugged on
+  waking, no app-open — `noop.analyzeWatermark` advances and `re-score: done` appears, with zero new
+  `NOOP*.cpu_resource*` reports. Baseline to beat is still the original **15** from 08-31/09-01.
+
+## Deliberately not doing
+
+- **`beginBackgroundTask`** as a standalone fix — doesn't address the CPU-monitor exposure that
+  actually causes the kill (see research above); `BGContinuedProcessingTask` is a strict upgrade for
+  the same problem.
+- **Wildcard `BGContinuedProcessingTask` identifiers** — a real, separate reported bug, and NOOP has
+  no concurrent-job use case that would need one.
+- **A full data-loss-risking reinstall as a first move** — try the upgrade path first; see
+  Verification.
+
+---
+
+# Phase 3 — make each background fire converge instead of starting over (2026-09-04)
+
+## Context
+
+Phase 2's cache fix worked (confirmed on device: three back-to-back passes, `reused=15/16`, `prep`
+1.7 s instead of 71 s). But sleep is **still not scored in the background.** On the morning of
+2026-09-04, strap synced, app never opened:
+
+- `bg.fireCount` 20 → **31** — iOS granted 11 background windows overnight.
+- `bg.lastOutcome` / `lastOutcomeAt` frozen at **2026-09-03 21:29:30**; `expireCount` still 2.
+- `analyze.lastPassEndedAt` frozen at **2026-09-03 21:29:29** — no pass has *completed* since.
+- Direct DB read: newest computed `sleepSession` is 09-02→09-03. **Last night is unscored.**
+- No `cpu_resource_fatal` after 00:20:06 and no jetsam during those 11 fires.
+
+iOS is not withholding time. It granted 11 windows and every one produced nothing durable.
+
+### Why: every fire attempts a full 21-day pass, and the pass is all-or-nothing
+
+1. **Nothing bounds a background pass.** `AnalyzePolicy.decide` returns `.run` unconditionally for
+   `.background` (`Strand/Data/AnalyzePolicy.swift:63`), so the 900 s floor that throttles
+   `.postOffload`/`.idleTick` is deliberately bypassed. The only remaining gate is the whole-store
+   fingerprint (`IntelligenceEngine.swift:569`), which always moves because offloads keep landing.
+   `analyzeIfStale()` (`:2528`) calls `analyzeRecent` with the default `maxDays: 21` — full width,
+   every fire.
+2. **Progress is banked only at the very end.** The watermark (`:2498`) and `completedPassCount`
+   (`:2503`) are gated on `!Task.isCancelled` and written only after pass 2 finishes; the day-scan
+   cache is persisted once, after the loop (`:1595` — its comment says "Once per pass, never per
+   day"). A process that dies mid-pass *without cancellation* — which is what an ordinary iOS
+   termination gives you — persists nothing at all.
+
+Net: 11 fires each did real work and discarded it.
+
+### Two corrections, recorded so they are not repeated
+
+- **"11 fires, zero outcomes ⇒ `recordOutcome` was never reached" is NOT established.**
+  `BackgroundAnalyzeTelemetry` never calls `synchronize()` — every write is a bare
+  `UserDefaults.set`. `recordFire()` runs at t=0 with minutes of process life for iOS's periodic
+  flush; `recordOutcome()` runs at t=N immediately before whatever ends the process. "fireCount
+  persisted, outcome didn't" fits *both* "never reached" and "never flushed". The telemetry cannot
+  tell them apart — which is why Commit 3 exists.
+- **A timeout + cancellation budget does NOT work.** Pass 2 (`:1618`–`:2516`, ~700 lines including
+  `await repo.refresh()` at `:2488`) has **no `Task.isCancelled` checks at all**. Cancelling
+  truncates the scan loop and then runs the whole expensive tail anyway. Do not implement it.
+
+## Approach
+
+Narrowing `maxDays` is the lever that works, because `oldestDay` derives from it (`:411`, `:2053`) —
+a narrow window shrinks **both** the scan loop and pass 2's reconcile span, so nothing needs to be
+cancellable.
+
+1. **Bound the background pass to a narrow window.** `analyzeIfStale()` (`:2528-2532`) passes a small
+   `maxDays` (start at **3** — today, last night, one margin day) instead of the default 21. Put the
+   constant in `Strand/Data/BackgroundAnalyzeSchedulePolicy.swift` beside the existing re-arm
+   intervals so it is named, documented and unit-testable rather than a literal.
+   **Safety verified:** `ComputedScoreReconcilePolicy` plus `oldestDay = nowLocalMidnight −
+   (maxDays−1)·86400` mean the stale-day eviction and `persistComputedScores`' delete-then-reinsert
+   span exactly the days scanned — a narrow pass is self-consistent, not a truncated one.
+   **Known limitation, to state in the commit and the validation entry:** a *completed* narrow pass
+   writes the whole-store watermark (`:2498`), claiming freshness beyond what it scored. A backlog
+   older than the window will not be caught by background passes; the foreground and idle-tick paths
+   keep the full 21-day window and remain the catch-up route.
+
+2. **Checkpoint the day-scan cache incrementally, off the MainActor.** Persist from *inside* the
+   detached scan loop after each day — throttled to at most once every ~5 s, and only when a day was
+   actually scanned since the last checkpoint — so a fire cut off without cancellation still banks
+   what it scanned. Keep the end-of-pass save as the final write. Confirm `DayScanCacheStore`
+   (`Strand/Data/DayScanCacheStore.swift`) carries no MainActor isolation so it is callable from the
+   detached task; its writes are already `.atomic`.
+
+3. **Telemetry that survives an unannounced termination.** Add `lastStage` / `lastStageAt` to
+   `BackgroundAnalyzeTelemetry`, written at each milestone inside the background task (fired → store
+   opened → fingerprint read → scan started → scan finished → pass 2 finished → outcome), each
+   forced to disk. This makes the next occurrence *diagnosable* rather than inferred, and settles the
+   unreached-vs-unflushed ambiguity directly.
+
+4. **Move the blocking I/O off the MainActor (safe subset).** All three run on every background pass
+   and block the main thread with no `await`:
+   - `IntelligenceEngine.swift:877` — `DayScanCacheStore.load()`, synchronous read + JSON decode
+   - `IntelligenceEngine.swift:1595` — `DayScanCacheStore.save()`, synchronous JSON encode + write
+   - `IntelligenceEngine.swift:706-707` — `registry.all()` / `registry.activeDeviceId()`, synchronous
+     GRDB reads (`registryWriter` is `nonisolated`, `DeviceRegistryStore.swift:20-27`)
+
+   **Deliberately out of scope:** `hrFingerprint()`'s unindexed whole-store `COUNT(*)` over
+   `hrSample` (`:567`, `Packages/WhoopStore/.../Reads.swift:91-100`). First thing every pass does and
+   a strong suspect, but it changes a query the freshness gate depends on — it gets its own
+   measurement first. File it in `docs/BACKLOG.md`.
+
+5. **Docs.** A `docs/PENDING_VALIDATION.md` entry for the claim-set (only a real overnight can
+   confirm it), and the `hrFingerprint` note in `docs/BACKLOG.md`.
+
+**Not doing — the submit/re-arm churn.** `submit()` cancels before every submit
+(`SyncAnalyzeBackgroundScheduler.swift:96`) and the undebounced `live.$lastSyncedAt` sink
+(`AppModel.swift:426-431`) fires every ~8-10 min, so the pending request is always the unbounded
+"ASAP" variety rather than a deferred floor. But 11 fires in 12 h is far slower than that cadence,
+so iOS's own throttling — not our churn — is the binding constraint. Real, minor, not the cause.
+
+## Files
+
+- `Strand/Data/IntelligenceEngine.swift` — `:2528` the window, `:1591-1604` the persist to make
+  incremental, `:877` and `:706-707` the blocking reads
+- `Strand/Data/BackgroundAnalyzeSchedulePolicy.swift` — the new window constant
+- `Strand/Data/DayScanCacheStore.swift` — confirm off-actor callability
+- `StrandiOS/System/BackgroundAnalyzeTelemetry.swift` — stage breadcrumbs + forced flush
+- `docs/PENDING_VALIDATION.md`, `docs/BACKLOG.md`
+
+**Kotlin twin:** none owed, to confirm at implementation. `BGProcessingTask` scheduling is iOS-only
+and the Android day cache is in-memory (`IntelligenceEngine.kt:83`, a `HashMap`) with no persistence,
+so the checkpointing has no counterpart. If the window constant lands in shared analytics rather than
+the iOS-only policy file, mirror it.
+
+## Branch
+
+`fix/background-analyze-converges` off `main`. `main` currently carries the **unpushed** local commit
+`f3eee8c8` (the `repo.refresh` timing instrumentation) — branch from current `main` so it is
+included. No push without an explicit ask.
+
+## Verification
+
+- **First action:** stop the hourly monitoring cron (`CronDelete c455d16f`) — its device tunnel is a
+  confound for exactly the idle-state behaviour being measured.
+- `cd Packages/StrandAnalytics && swift test`; `WhoopStore` too if its reads are touched.
+- App targets are not covered by CI — build both by hand: macOS `Strand`, and the `NOOPiOS` scheme.
+- `python3 Tools/doc_comment_lint.py` and `python3 Tools/i18n_audit.py --ci origin/main`.
+- Deploy to device, then **one overnight with the app never opened.** Morning acceptance:
+  1. `bg.lastStage` has advanced past "fired" — the most informative new signal.
+  2. `bg.lastOutcome` / `lastOutcomeAt` are current, not frozen at the prior evening.
+  3. `analyze.lastPassEndedAt` has advanced past the night.
+  4. Direct DB read shows a `sleepSession` row for the night, `source=computed`, with the app never
+     opened.
+  5. Zero new `NOOP*.cpu_resource*` reports (baseline: 21 files, newest 2026-09-04 00:20:06).
+- If (1) advances but (2)–(4) do not, the stage marker names the exact step to attack next — which is
+  the whole reason it ships alongside rather than after.
+
+## REVISION after design review — this supersedes the Approach above
+
+A design review found two of the four proposed changes defective. Revised scope:
+
+**DROPPED — the narrow `maxDays` window (was item 1).** Two reasons. (a) The cache prune at
+`IntelligenceEngine.swift:1545-1546` means a narrowed pass writes the *smaller* entry set back to
+disk, so a 3-day background pass would shrink the on-disk cache and leave the next foreground 21-day
+pass cold for 18 days — actively worse than doing nothing. (b) It buys little anyway: narrowing
+removes the nearly-free cache hits, not the one expensive fresh day, which is precisely last night.
+Record it in `docs/BACKLOG.md` *with the prune landmine written down* so it is not re-attempted
+naively.
+
+**PREREQUISITE — contract the truncated-pass reconciles.** Two genuine bugs, worth fixing on their
+own merits, and one of them must land before checkpointing means anything:
+- `:2456` `deleteWorkouts(deviceId:sport:"detected",from:windowStart,to:now)` spans the whole window
+  while `workoutRows` is built only from `scoredNights` — a truncated pass deletes detected workouts
+  across days it never re-scored and re-inserts only the newest. Contract it to `reconcileFromDay`'s
+  span exactly as `persistComputedScores` already is at `:2126-2135`.
+- The `#899` heal (`:2400-2410`) sweeps the full `oldestDay...newestDay` on a truncated pass, and if
+  it drops anything, `:2432-2439` runs `dayScanCache.removeAll()` + `DayScanCacheStore.clear()`.
+  **That deletes the very checkpoint the next change exists to accumulate.** Gate the sweep, the
+  cache clear and the `pendingForcedRescore` re-arm on `!passWasCancelled`.
+
+**Revised commit order**
+
+1. **Contract the truncated-pass reconciles** (the two bugs above). Prerequisite for #3.
+2. **Durable stage telemetry** — `lastStage`/`lastStageAt` in `BackgroundAnalyzeTelemetry`, forced to
+   disk at each milestone. Settles unreached-vs-unflushed and names the failing step next time.
+3. **Incremental checkpointing** of the day-scan cache from inside the detached scan loop. Confirmed
+   mechanically possible (plain `enum`, no actor isolation, `.atomic` writes; `load()` has no
+   whole-window assumption and any loop prefix is consistent with the fixed `configSig`). But the
+   checkpoint is **O(window), not O(1)** — it re-projects all ~21 entries and encodes the whole
+   ~407 KB envelope — so throttle on elapsed time **and** gate on "a day was actually scanned fresh
+   this iteration"; a cache-hit day is already on disk byte-identical. Instrument the encode cost
+   onto the existing `skippedDayLines` tally before fixing the interval.
+4. **Fix the retry interval.** A truncated pass returns `scored: false`, so the scheduler records
+   `.noop` and re-arms at `reArmAfterNoopSeconds` = 3600 s — which *exactly matches* the observed
+   hourly process replacement. Surface a distinct partial/truncated outcome from `analyzeIfStale`
+   (`:2528-2532`) so the scheduler records it separately and re-arms at the short 900 s interval.
+   `.background` is unfloored in `AnalyzePolicy.decide`, so nothing blocks a tighter re-arm.
+5. **Move the blocking I/O off the MainActor** — `:877` load, `:1595` save, `:706-707` registry
+   reads. Unchanged from item 4 of the original approach.
+6. **Docs** — `docs/PENDING_VALIDATION.md` entry; `docs/BACKLOG.md` for the `hrFingerprint`
+   `COUNT(*)` and for the dropped narrow-window idea plus its prune landmine.
+
+**Also suppress the `#899-A` re-arm for `.background`.** The re-invoke at `:642` is an unstructured
+`Task {}` that inherits no cancellation, and the carried trigger falls back to `.dataChange`
+(`:629`), which `AnalyzePolicy` never floors — so it can spawn a full unbudgeted second pass in the
+background. The next BGTask fire is the successor; don't self-re-arm there.
+
+**One claim from the review NOT accepted.** It anchors its arithmetic on "~70 s for one uncached
+day", quoting comments that predate `c863218a`. Measured post-fix on 2026-09-03: a fresh day is
+`prep=1745ms score=12548ms` ≈ 14 s, and a second pass 8.3 s, with `otherReads` dominating prep. The
+"one day cannot fit the budget" premise is stale. Its wall-clock-vs-CPU-time caveat is fair and the
+`prep`/`score` tallies should not be compared to the 48 s CPU budget as if the units matched.
