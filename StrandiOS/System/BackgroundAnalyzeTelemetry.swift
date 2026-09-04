@@ -60,6 +60,62 @@ enum BackgroundAnalyzeTelemetry {
         }
     }
 
+    // MARK: - Stage breadcrumbs (#1005-CONVERGE, 2026-09-04)
+
+    /// Why this exists: on 2026-09-04 the device showed `fireCount` 20 → 31 — iOS granted 11 background
+    /// windows — while `lastOutcome`/`lastOutcomeAt` stayed frozen at the previous evening and
+    /// `expireCount` never moved. Every write above is a bare `UserDefaults.set` with no flush, and
+    /// `recordFire` runs at the START of a pass (minutes of process life for the periodic flush to land
+    /// it) while `recordOutcome` runs at the END, immediately before whatever ends the process. So
+    /// "fireCount persisted, outcome didn't" is equally consistent with "control flow never got there"
+    /// and "it got there and the write was lost" — and the two want completely different fixes.
+    ///
+    /// These breadcrumbs settle it. Each records WHERE the pass was last seen alive and is forced to
+    /// disk immediately, so an unannounced termination still leaves the marker behind.
+    ///
+    /// Gated on `passInFlight` so this costs nothing on the foreground paths, which run the same
+    /// diagnostics constantly and must not pay a synchronous flush per line.
+    @MainActor private static var passInFlight = false
+
+    /// Milestones, in the order a healthy pass passes them. Matched by prefix against the lines
+    /// `IntelligenceEngine`/`AppModel` already emit, so the engine needs no new API and there is no
+    /// second set of call sites to keep in step — the cost is that renaming a diagnostic line silently
+    /// stops a breadcrumb, which `debugLines()` makes visible by showing the stage it did reach.
+    private static let stageMarkers: [(prefix: String, stage: String)] = [
+        ("re-score: trigger=", "analyzeEntered"),
+        ("analyzeRecent dayCache LOADED", "cacheLoaded"),
+        ("analyzeRecent dayCache DROPPED", "cacheDropped"),
+        ("analyzeRecent dayCache reused=", "scanFinished"),
+        ("analyzeRecent cost prep=", "costTallied"),
+        ("analyzeRecent CANCELLED mid-scan", "scanTruncated"),
+        ("re-score: done", "pass2Finished"),
+        ("background analyze: scored=", "returned"),
+    ]
+
+    /// Bracket one delivered background pass. `runBackgroundAnalyze` owns both calls.
+    @MainActor static func beginPass() {
+        passInFlight = true
+        write(stage: "fired")
+    }
+
+    @MainActor static func endPass() { passInFlight = false }
+
+    /// Tap on the engine's existing diagnostic sink — see `AppModel.init()`'s wiring.
+    @MainActor static func noteStage(_ line: String) {
+        guard passInFlight,
+              let marker = stageMarkers.first(where: { line.hasPrefix($0.prefix) }) else { return }
+        write(stage: marker.stage)
+    }
+
+    @MainActor private static func write(stage: String) {
+        d.set(stage, forKey: prefix + "lastStage")
+        d.set(Date().timeIntervalSince1970, forKey: prefix + "lastStageAt")
+        // The whole point: survive a termination that gives no notice. `synchronize()` is the only
+        // forced flush `UserDefaults` offers; it is documented as unnecessary for normal use, which is
+        // exactly why it is warranted here and nowhere else in this file.
+        d.synchronize()
+    }
+
     // MARK: - Read (debug export)
 
     /// Lines for the iOS debug export's "Strap & data" block — so the record rides the shareable log,
@@ -85,6 +141,12 @@ enum BackgroundAnalyzeTelemetry {
         let outcome = d.string(forKey: prefix + "lastOutcome") ?? "—"
         let expires = d.integer(forKey: prefix + "expireCount")
         lines.append("Last outcome: \(outcome) (\(rel("lastOutcomeAt")))\(expires > 0 ? " · \(expires) expired total" : "")")
+        // #1005-CONVERGE: the discriminator. A `lastStage` NEWER than `lastOutcomeAt` means the pass got
+        // that far and then died without recording an outcome — which is the failure this was added to
+        // catch. A stage of `fired` alone means it never even reached `analyzeRecent`.
+        if let stage = d.string(forKey: prefix + "lastStage") {
+            lines.append("Last stage: \(stage) (\(rel("lastStageAt")))")
+        }
         return lines
     }
 

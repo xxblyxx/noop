@@ -232,7 +232,16 @@ final class AppModel: ObservableObject {
         // subsystem writes to (PII-scrubbed by `live.append(log:)`), so a bug report ships proof of what
         // was computed per day. `live` is captured strongly (created just above) , the engine outlives the
         // app session, so there's no retain-cycle risk worth a weak dance here. (Sleep overhaul §2.5.)
-        self.intelligence.diagnosticSink = { [live] line, domain in live.append(log: line, domain: domain) }
+        // #1005-CONVERGE (2026-09-04): tap the SAME lines for the background-pass stage breadcrumbs, rather
+        // than adding a second sink to the engine — the milestones this needs (`re-score: trigger=`,
+        // `dayCache LOADED/DROPPED`, `cost prep=`, `re-score: done`) are already emitted here, in order.
+        // `noteStage` is a no-op unless a delivered BGProcessingTask pass is in flight.
+        self.intelligence.diagnosticSink = { [live] line, domain in
+            live.append(log: line, domain: domain)
+            #if os(iOS)
+            BackgroundAnalyzeTelemetry.noteStage(line)
+            #endif
+        }
         // #1005-STORM: mirror the engine's `computing` lock onto `live.analyzing` so BLEManager (which has
         // no reference to IntelligenceEngine, by design) can defer starting a NEW automatic backfill
         // session while a rescore is in flight — see `live.analyzing`'s doc comment for why this exists.
@@ -733,6 +742,11 @@ final class AppModel: ObservableObject {
         // same reason it's fine there.
         live.analyzing = true
         defer { live.analyzing = false }
+        // #1005-CONVERGE (2026-09-04): bracket the pass so `BackgroundAnalyzeTelemetry`'s stage
+        // breadcrumbs record — and force-flush — where this fire was last seen alive. Gated to this
+        // function so the foreground paths, which emit the same diagnostics constantly, pay nothing.
+        BackgroundAnalyzeTelemetry.beginPass()
+        defer { BackgroundAnalyzeTelemetry.endPass() }
         let scored = await intelligence.analyzeIfStale()
         live.append(log: "background analyze: scored=\(scored)")
         guard scored else { return false }
