@@ -880,12 +880,22 @@ final class IntelligenceEngine: ObservableObject {
         // block below would drop a cache that has nothing in it and every night would re-read + re-score —
         // measured at 2403 s for 9 nights, backgrounded, on 2026-08-27. Load last launch's scans first.
         // Only on a genuinely cold process: mid-process the in-memory cache is authoritative and newer.
-        if dayScanCacheConfigSig.isEmpty, dayScanCache.isEmpty, let env = DayScanCacheStore.load() {
-            dayScanCache = env.entries.mapValues { (key: $0.key, scan: $0.scan.toScan()) }
-            daySkipCache = env.skipEntries.mapValues { (key: $0.key, hrCount: $0.hrCount) }
-            dayScanCacheConfigSig = env.configSig
-            diagnosticSink?("analyzeRecent dayCache LOADED \(dayScanCache.count) day(s) "
-                            + "(+\(daySkipCache.count) skip) from disk", nil)
+        // #1005-CONVERGE (2026-09-04): read + JSON-decode OFF the main actor. `load()` is
+        // `Data(contentsOf:)` + `JSONDecoder().decode` over an envelope measured at ~407 KB on device
+        // `819D37A3`, and it ran synchronously on the MainActor with no `await` — blocking the main thread
+        // on file I/O at the head of every pass, including every background fire. `DayScanCacheStore` is a
+        // plain enum of static functions over the file system with no shared mutable state, and the
+        // envelope is decoded inside the task and handed straight back, so the hop is a clean transfer.
+        // Nested rather than folded into one `if let` chain: the load must stay gated on the cold-process
+        // check, or hoisting it off-actor would turn a once-per-launch read into a once-per-pass one.
+        if dayScanCacheConfigSig.isEmpty, dayScanCache.isEmpty {
+            if let env = await Task.detached(priority: .utility, operation: { DayScanCacheStore.load() }).value {
+                dayScanCache = env.entries.mapValues { (key: $0.key, scan: $0.scan.toScan()) }
+                daySkipCache = env.skipEntries.mapValues { (key: $0.key, hrCount: $0.hrCount) }
+                dayScanCacheConfigSig = env.configSig
+                diagnosticSink?("analyzeRecent dayCache LOADED \(dayScanCache.count) day(s) "
+                                + "(+\(daySkipCache.count) skip) from disk", nil)
+            }
         }
         // Drop the whole cache on a config change, then snapshot it into a Sendable `let` for the detached
         // loop (the engine is @MainActor; the loop can't touch `self`). The loop returns the updated cache
@@ -1643,14 +1653,24 @@ final class IntelligenceEngine: ObservableObject {
         // every night. Once per pass, never per day. A failed write costs a cold pass next launch and
         // nothing else — but it is logged, because a cache that silently stopped persisting would look
         // exactly like the bug this closes.
-        if !DayScanCacheStore.save(configSig: dayCacheConfigSig,
-                                   entries: dayScanCache.mapValues {
-                                       DayScanCacheStore.Entry(key: $0.key,
-                                                               scan: DayScanCacheStore.Scan($0.scan))
-                                   },
-                                   skipEntries: daySkipCache.mapValues {
-                                       DayScanCacheStore.SkipEntry(key: $0.key, hrCount: $0.hrCount)
-                                   }) {
+        // #1005-CONVERGE (2026-09-04): project + JSON-encode + write OFF the main actor, same reasoning as
+        // the load above. This ran synchronously on the MainActor with no `await`, and it is the heavier
+        // half — it re-projects every cached entry (including each night's ~960-entry motion and
+        // sleep-state maps) before encoding the whole envelope. The projections are built inside the task
+        // so that work moves too, not just the write.
+        let entriesToPersist = dayScanCache
+        let skipEntriesToPersist = daySkipCache
+        let persisted = await Task.detached(priority: .utility) {
+            DayScanCacheStore.save(
+                configSig: dayCacheConfigSig,
+                entries: entriesToPersist.mapValues {
+                    DayScanCacheStore.Entry(key: $0.key, scan: DayScanCacheStore.Scan($0.scan))
+                },
+                skipEntries: skipEntriesToPersist.mapValues {
+                    DayScanCacheStore.SkipEntry(key: $0.key, hrCount: $0.hrCount)
+                })
+        }.value
+        if !persisted {
             diagnosticSink?("analyzeRecent dayCache PERSIST FAILED — next launch will run cold", nil)
         }
 
