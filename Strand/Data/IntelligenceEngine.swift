@@ -636,7 +636,14 @@ final class IntelligenceEngine: ObservableObject {
             let rearmSkipIfUnchanged = pendingForcedRescoreSkipIfUnchanged
             pendingForcedRescoreTrigger = nil
             pendingForcedRescoreSkipIfUnchanged = false
-            if wasPendingForcedRescore, !Task.isCancelled {
+            // #1005-CONVERGE (2026-09-04): never self-re-arm from a BACKGROUND pass. This re-invoke is an
+            // unstructured `Task {}`, so it inherits no cancellation and nothing can bound it — and
+            // `rearmTrigger` falls back to `.dataChange`, which `AnalyzePolicy.decide` never floors. So a
+            // background fire whose #899 heal set `pendingForcedRescore` could spawn a second, full-width,
+            // completely unbudgeted pass inside the same short window that could not finish the first one.
+            // The next `BGProcessingTask` fire IS the successor here — `SyncAnalyzeBackgroundScheduler`
+            // arms one before the work even starts — so dropping the re-arm loses nothing.
+            if wasPendingForcedRescore, !Task.isCancelled, trigger != .background {
                 // Carry THIS pass's window into the re-pass: a heal firing during a wide one-shot pass
                 // must re-score the same width, not the default 21 days (Kotlin re-passes with the same
                 // maxDays; keep the platforms in lockstep).
