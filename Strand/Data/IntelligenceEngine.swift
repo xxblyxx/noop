@@ -2401,8 +2401,16 @@ final class IntelligenceEngine: ObservableObject {
         for healId in healDeviceIds {
             let storedSessions = (try? await store.sleepSessions(deviceId: healId, from: windowStart,
                                                                  to: now, limit: 4000)) ?? []
+            // #1005-CONVERGE (2026-09-04): contract to the ACTUALLY-SCORED span on a truncated pass, the
+            // same correction `persistComputedScores` already got above — and for the same reason, one step
+            // worse. `keptStarts` (the freshness witness this sweep dedupes against) is built only from the
+            // days the loop reached, so on a pass cut short mid-scan every OLDER day would be deduped with
+            // no bank-recency witness at all, resolving on longest-wins alone. Worse, any drop here clears
+            // the whole persisted day-scan cache below — so an interrupted pass could delete the very
+            // checkpoint the next fire needs. `reconcileFromDay` is `oldestDay` on a complete pass, so this
+            // is byte-identical in the normal case.
             let healable = storedSessions.filter {
-                (oldestDay...newestDay).contains(AnalyticsEngine.dayString($0.endTs, offsetSec: tzOffset))
+                (reconcileFromDay...newestDay).contains(AnalyticsEngine.dayString($0.endTs, offsetSec: tzOffset))
             }
             let sweep = SleepSessionDedup.dedupe(healable, freshStarts: keptStarts)
             for stale in sweep.dropped {
@@ -2453,8 +2461,27 @@ final class IntelligenceEngine: ObservableObject {
         // Make re-detection idempotent across runs: clear the prior computed detected workouts in the
         // scored window (a bout's startTs can drift as more HR arrives, which would otherwise orphan
         // stale rows under the (deviceId,startTs,sport) key), then re-insert.
+        // #1005-CONVERGE (2026-09-04): the delete spans the window; `workoutRows` is built only from
+        // `scoredNights`. On a pass cut short mid-scan those disagree, and the wide delete removes detected
+        // workouts across every older day the pass never re-scored — deleting real rows it cannot re-insert.
+        // Third instance of the same contraction (`persistComputedScores` at the reconcile above, then the
+        // #899 heal). Timestamps, not day keys, so map `reconcileFromDay` back onto the loop's own geometry:
+        // it scans newest-first from `nowLocalMidnight`, and `from` per day is `dayStart - 30h`, so the
+        // matching offset's `dayStart - 30h` is exactly the earliest instant this pass could have touched.
+        // Falls back to the full `windowStart` on a complete pass (where `reconcileFromDay == oldestDay`),
+        // so the normal path is unchanged.
+        let detectedDeleteFrom: Int = {
+            guard passWasCancelled else { return windowStart }
+            for offset in 0..<maxDays {
+                let dayStart = nowLocalMidnight - offset * 86_400
+                if AnalyticsEngine.dayString(dayStart, offsetSec: tzOffset) == reconcileFromDay {
+                    return dayStart - 30 * 3_600
+                }
+            }
+            return windowStart
+        }()
         _ = try? await store.deleteWorkouts(deviceId: computedId, sport: "detected",
-                                            from: windowStart, to: now)
+                                            from: detectedDeleteFrom, to: now)
         if !workoutRows.isEmpty { _ = try? await store.upsertWorkouts(workoutRows, deviceId: computedId) }
         // #510: write back any real (manual/imported) rows a dropped detected bout backfilled, one
         // upsert per owning deviceId (see the collision branch above for why these can't share the
