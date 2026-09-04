@@ -30,7 +30,9 @@ enum SyncAnalyzeBackgroundScheduler {
     /// (project.yml).
     /// `operation` returns whether the pass actually scored anything (`false` = the fingerprint gate
     /// found nothing new, the common case) — recorded as the delivered task's outcome.
-    static func register(perform operation: @escaping @MainActor () async -> Bool) {
+    static func register(
+        perform operation: @escaping @MainActor () async -> BackgroundAnalyzeSchedulePolicy.PassOutcome
+    ) {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
             let completion = TaskCompletionGuard(task: task)
             let worker = Task { @MainActor in
@@ -40,7 +42,7 @@ enum SyncAnalyzeBackgroundScheduler {
                 // deferred-analyze path permanently unscheduled. Conservative (`scored: false`) interval
                 // since the outcome isn't known yet; tightened below if this pass actually scores.
                 scheduleReArm(scored: false)
-                let scored = await operation()
+                let outcome = await operation()
                 // #1005-COST: report completion HERE on both paths — the cancelled one too. When the
                 // `expirationHandler` cancels this worker, `analyzeRecent` unwinds its per-day scan,
                 // writes back the newest nights it did finish, and PERSISTS that partial checkpoint to
@@ -53,8 +55,14 @@ enum SyncAnalyzeBackgroundScheduler {
                     completion.finish(success: false)
                     return
                 }
-                BackgroundAnalyzeTelemetry.recordOutcome(scored ? .scored : .noop)
-                if scored { scheduleReArm(scored: true) }
+                // #1005-CONVERGE (2026-09-04): three-way, not two. A `.truncated` pass banked real work
+                // and has more of the window waiting, so it re-arms at the SHORT interval like `.scored`.
+                // Previously it was indistinguishable from `.noop` and re-armed 60 minutes out — the exact
+                // hourly cadence the device log showed, which cannot converge a window that needs several
+                // fires. `.noop` keeps the long interval: nothing to do is genuinely worth backing off for.
+                BackgroundAnalyzeTelemetry.recordOutcome(
+                    outcome == .scored ? .scored : (outcome == .truncated ? .truncated : .noop))
+                if outcome != .noop { scheduleReArm(outcome: outcome) }
                 completion.finish(success: true)
             }
             task.expirationHandler = {
@@ -88,6 +96,12 @@ enum SyncAnalyzeBackgroundScheduler {
     /// Private: every OTHER caller wants "as soon as possible" (`schedule()`), never a deferred date.
     private static func scheduleReArm(scored: Bool) {
         let date = BackgroundAnalyzeSchedulePolicy.earliestBeginDate(after: Date(), scored: scored)
+        submit(earliestBeginDate: date)
+    }
+
+    /// #1005-CONVERGE: three-way form, for the post-work re-arm where the outcome is actually known.
+    private static func scheduleReArm(outcome: BackgroundAnalyzeSchedulePolicy.PassOutcome) {
+        let date = BackgroundAnalyzeSchedulePolicy.earliestBeginDate(after: Date(), outcome: outcome)
         submit(earliestBeginDate: date)
     }
 

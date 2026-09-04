@@ -104,7 +104,7 @@ struct StrandiOSApp: App {
         // same registration requirement as ScheduledDebugExport above. `schedule()` is called from the
         // `.background` scenePhase transition, not here; this call only teaches iOS the identifier exists.
         SyncAnalyzeBackgroundScheduler.register { [weak model] in
-            await model?.runBackgroundAnalyze() ?? false
+            await model?.runBackgroundAnalyze() ?? .noop
         }
     }
 

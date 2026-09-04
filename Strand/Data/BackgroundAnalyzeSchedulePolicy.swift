@@ -37,10 +37,37 @@ enum BackgroundAnalyzeSchedulePolicy {
     /// permanent tight cadence.
     static let reArmAfterNoopSeconds: TimeInterval = 4 * AnalyzePolicy.forcedFloorSeconds
 
-    /// The `earliestBeginDate` for the next self-armed request. `scored` is whether the pass THIS
-    /// interval follows found something (an expiration, whose outcome is unknown, should pass `false` —
-    /// treat it the same as a no-op rather than assume it would have scored).
+    /// #1005-CONVERGE (2026-09-04): re-arm interval after a pass that did real work but was cut short
+    /// before finishing its window. Same as `scored` — a truncated pass is the strongest possible signal
+    /// that more work is waiting, so it must NOT fall into the no-op interval. It did, until this existed:
+    /// a truncated pass reports no completed pass, which read as "nothing to do" and re-armed 60 minutes
+    /// out. The 2026-09-04 device log shows exactly that hourly cadence, which cannot converge a window
+    /// that needs several fires to finish.
+    static let reArmAfterTruncatedSeconds: TimeInterval = AnalyzePolicy.forcedFloorSeconds
+
+    /// What one delivered pass resolved to, for scheduling purposes.
+    enum PassOutcome {
+        /// Ran to completion and advanced the watermark.
+        case scored
+        /// Did real work and banked it, but was cancelled before finishing the window — more remains.
+        case truncated
+        /// Ran, found nothing new. The common case.
+        case noop
+    }
+
+    /// The `earliestBeginDate` for the next self-armed request.
+    static func earliestBeginDate(after date: Date, outcome: PassOutcome) -> Date {
+        switch outcome {
+        case .scored:    return date.addingTimeInterval(reArmAfterScoredSeconds)
+        case .truncated: return date.addingTimeInterval(reArmAfterTruncatedSeconds)
+        case .noop:      return date.addingTimeInterval(reArmAfterNoopSeconds)
+        }
+    }
+
+    /// Two-way form, kept for the "arm before work" call that runs before any outcome is known (and for
+    /// an expiration, whose outcome is unknown — it passes `false`, treating it as a no-op rather than
+    /// assuming it would have scored).
     static func earliestBeginDate(after date: Date, scored: Bool) -> Date {
-        date.addingTimeInterval(scored ? reArmAfterScoredSeconds : reArmAfterNoopSeconds)
+        earliestBeginDate(after: date, outcome: scored ? .scored : .noop)
     }
 }

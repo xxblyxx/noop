@@ -36,6 +36,12 @@ final class IntelligenceEngine: ObservableObject {
     /// that really was scored. This counter is independent of `wmKey` entirely, so that failure mode can't
     /// reach it.
     private(set) var completedPassCount = 0
+    /// #1005-CONVERGE (2026-09-04): whether the most recent `analyzeRecent` was cut short mid-scan. Paired
+    /// with `completedPassCount` it gives the background scheduler a three-way answer — scored / truncated
+    /// / nothing-to-do — where it previously saw only `scored == false` for the last two. That conflation
+    /// made a truncated pass re-arm at the 60-minute no-op interval, which cannot converge a window that
+    /// needs several fires to finish.
+    private(set) var lastPassTruncated = false
     /// #1005-STORM (2026-08-25): non-nil while an AUTOMATIC re-score trigger (`.postOffload`/`.idleTick`)
     /// was REJECTED by `AnalyzePolicy`'s forced-pass floor — see `floorDecision(for:)`. Published so
     /// `AppModel` can schedule exactly one coalesced retry at this instant (`init()`'s
@@ -2573,6 +2579,12 @@ final class IntelligenceEngine: ObservableObject {
         // `completedPassCount`'s doc for why the watermark string can't be trusted for this on its own.
         // After the cancellation check above, so a cancelled pass doesn't count as completed.
         if !Task.isCancelled { completedPassCount += 1 }
+        // #1005-CONVERGE (2026-09-04): remember whether this pass was cut short, so the background
+        // scheduler can tell "nothing to do" from "did work, more remains". Without it both look like
+        // `scored == false` and the scheduler re-arms at the 60-minute no-op interval — which is exactly
+        // the hourly cadence the 2026-09-04 device log showed, and far too slow to converge a window one
+        // truncated fire at a time. Written unconditionally so it never carries a stale `true` forward.
+        lastPassTruncated = passWasCancelled
         // #1005-STORM (2026-08-25): advance the floor's watermark. Gated on `!Task.isCancelled` ONLY —
         // deliberately NOT combined with the `!wmKey.isEmpty` check the watermark write above uses. That
         // is a DIFFERENT, stricter gate (a transient `hrFingerprint()` throw empties `wmKey` via `try?`);
@@ -2597,10 +2609,15 @@ final class IntelligenceEngine: ObservableObject {
     /// the watermark under-reported whenever `store.hrFingerprint()` transiently threw (empty `wmKey`
     /// disables the watermark write too), so a pass that genuinely ran could still report `scored: false`.
     /// See `completedPassCount`'s doc for the full failure mode this replaces.
-    func analyzeIfStale() async -> Bool {
+    /// #1005-CONVERGE (2026-09-04): reports THREE outcomes, not two. A pass cut short mid-scan advances
+    /// neither the watermark nor `completedPassCount` (both gated on `!Task.isCancelled`), so it used to
+    /// be indistinguishable from "nothing to do" — and the scheduler re-armed 60 minutes out for a pass
+    /// that had banked real work and had more waiting. `lastPassTruncated` separates them.
+    func analyzeIfStale() async -> BackgroundAnalyzeSchedulePolicy.PassOutcome {
         let before = completedPassCount
         await analyzeRecent(force: false, trigger: .background)
-        return completedPassCount != before
+        if completedPassCount != before { return .scored }
+        return lastPassTruncated ? .truncated : .noop
     }
 
     /// UserDefaults key for the #836 idle-tick gate: the `(count:maxTs)` HR fingerprint the last completed

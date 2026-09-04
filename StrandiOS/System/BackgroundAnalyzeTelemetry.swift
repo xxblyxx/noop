@@ -24,6 +24,11 @@ enum BackgroundAnalyzeTelemetry {
         case noop
         /// iOS fired the task's `expirationHandler` before the pass finished — it was cancelled.
         case expired
+        /// #1005-CONVERGE (2026-09-04): the pass banked real work but was cut short before finishing its
+        /// window, so more remains. Distinct from `noop` (nothing to do) and from `expired` (which is
+        /// recorded from the expiration handler and says nothing about whether work landed) — it is the
+        /// reading that tells a device pull "this is converging" rather than "this is idle".
+        case truncated
     }
 
     private static let prefix = "noop.analyze.bg."

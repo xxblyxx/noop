@@ -723,14 +723,16 @@ final class AppModel: ObservableObject {
     /// ONLY ever called from `SyncAnalyzeBackgroundScheduler`'s registered operation, which iOS invokes
     /// exclusively while backgrounded — so, unlike every other post-analyze site in this file, this one
     /// does not need its own foreground/background check before notifying.
-    /// Returns whether the pass actually scored anything — `false` when it was skipped (a sync already
-    /// in flight) or `analyzeIfStale`'s fingerprint gate found nothing new. The caller
-    /// (`SyncAnalyzeBackgroundScheduler`) records it as the delivered task's outcome.
+    /// Returns what the pass resolved to — `.noop` when it was skipped (a sync already in flight) or
+    /// `analyzeIfStale`'s fingerprint gate found nothing new, `.truncated` when it banked real work but
+    /// was cut short, `.scored` on a completed pass. The caller (`SyncAnalyzeBackgroundScheduler`)
+    /// records it as the delivered task's outcome AND picks its re-arm interval from it — which is why
+    /// `.truncated` has to be distinguishable from `.noop` (#1005-CONVERGE).
     @discardableResult
-    func runBackgroundAnalyze() async -> Bool {
+    func runBackgroundAnalyze() async -> BackgroundAnalyzeSchedulePolicy.PassOutcome {
         guard !live.backfilling, !live.analyzing else {
             live.append(log: "background analyze: skipped, offload/analyze already in flight")
-            return false
+            return .noop
         }
         // #1005-STORM: claim `live.analyzing` manually, same reasoning as `refreshAfterCompletedBackfill`
         // above (`:614-628`) — `analyzeIfStale` calls `analyzeRecent`, whose own `computing = true` lands
@@ -747,16 +749,17 @@ final class AppModel: ObservableObject {
         // function so the foreground paths, which emit the same diagnostics constantly, pay nothing.
         BackgroundAnalyzeTelemetry.beginPass()
         defer { BackgroundAnalyzeTelemetry.endPass() }
-        let scored = await intelligence.analyzeIfStale()
-        live.append(log: "background analyze: scored=\(scored)")
-        guard scored else { return false }
+        let outcome = await intelligence.analyzeIfStale()
+        live.append(log: "background analyze: scored=\(outcome == .scored)"
+                    + (outcome == .truncated ? " (truncated — more of the window remains)" : ""))
+        guard outcome == .scored else { return outcome }
         await refreshV5Signals()
         await WidgetSnapshot.publish(from: self)
         await healthWriteBack?()
         if behavior.syncCompleteNotify {
             AnalyzeCompleteNotifier.post()
         }
-        return true
+        return .scored
     }
     #endif
 
