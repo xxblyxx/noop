@@ -53,7 +53,19 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 ### Background analyze converges across fires instead of restarting, and the stage breadcrumbs say where it dies
 - id: analyze-background-converges
 - shipped: `fix/background-analyze-converges`, commits `d672c960`, `34f44685`, `a13fd52d`,
-  `bd07103a`, `e213da7d`, `fc3ef8f4`, 2026-09-04 — pending merge to `main`.
+  `bd07103a`, `e213da7d`, `fc3ef8f4`, `7fcd73b3`, 2026-09-04 — pending merge to `main`. Built and
+  installed to device `819D37A3` on 2026-09-04 ~10:50.
+- ⚠️ first-pass caveat, so a cold session doesn't misread the first reading: `7fcd73b3` changes the
+  pass-config signature, so the FIRST pass after that install is legitimately one more full cold
+  pass (~6 min, `reused=0/N`). That is expected and is NOT a failure of the sentinel. Judge the
+  SECOND and later passes.
+- measured baselines to compare against (device `819D37A3`, all foreground):
+  - cold full pass, 09-04 10:20: `prep=73890ms score=281545ms`, 17 nights, **401 s total**
+  - warm pass, 09-03: `prep=1357ms score=2603ms`, **8.3 s total**, `reused=15/16`
+  - checkpoint overhead, 09-04: `checkpoints=16 totalling 278ms` — 0.07% of the pass, so the 5 s
+    interval in `IntelligenceEngine.dayScanCheckpointInterval` needs no tuning unless this grows
+  - `prep` is dominated by `otherReads` (65 614 ms of 73 890 ms) — the seven non-HR night streams,
+    not `hrRead` (8 273 ms). Noted in `docs/BACKLOG.md`; not addressed here.
 - claim: on a device where `BGProcessingTask` fires are granted but the process does not survive a
   whole pass, sleep still gets scored **without the app being opened**, because (a) a fire that is
   cut off banks the days it did scan (`a13fd52d` checkpoints the day-scan cache mid-loop) and the
@@ -117,7 +129,36 @@ difference between "we checked and it held" and "someone got tired of seeing it.
 - passes-if: (a) the pass after a scored night logs `reused=N/M` with N close to M and no
   `sig changed: baselines1.*`, and its `prep=` is < 10 000 ms. (b) after an `expired` outcome, the
   next fire's `reused=` is non-zero and the dayscan-cache file did not shrink to a cold size.
-- check-after: 2026-09-04
+- **2026-09-04 update — claim (a) FALSIFIED, fixed again in `7fcd73b3`. Claim (b) still open.**
+  The quantization in `c863218a` held for same-day passes (three back-to-back on 09-03:
+  `reused=15/16`, 24.9 s → 8.3 s → ~0 s, no drop) and then failed overnight the moment a real night
+  landed. Device log, 09-04 04:52 and again on the 10:20 foreground pass:
+
+      analyzeRecent dayCache DROPPED — sig changed: baselines1.hrv,baselines1.restingHR
+      analyzeRecent dayCache reused=0/17 size=17 days=21
+      analyzeRecent cost prep=73890ms score=281545ms
+      re-score: done — scored 17 night(s) in 401303 ms
+
+  **6 min 41 s, all 17 nights cold.** Quantizing to 1.0 ms/bpm was simply too tight: the trailing
+  `Baselines.foldHistory` centre drifts past that most nights, so the whole cache was still being
+  discarded roughly daily — every morning starting cold, which is exactly what makes a background
+  pass unsurvivable. `7fcd73b3` stops treating `baselines1` as a cache input at all and folds a
+  constant `"off"` sentinel, because pass 2 recomputes every baseline-derived field from
+  `baselines2` (`IntelligenceEngine.swift:1925-1943`) — a cached scan replays nothing `baselines1`
+  could have changed. Same treatment `sleepNeedHours`/`sleepConsistency` already had.
+- ⚠️ **READ THIS BEFORE DECLARING THE CACHE FIXED — it has now been attacked three times.**
+  (1) `sleepNeedHours`/`sleepConsistency`, quantized then sentinel'd; (2) `baselines1` quantized
+  (`c863218a`) — failed; (3) `baselines1` sentinel'd (`7fcd73b3`) — under test. The failure mode is
+  identical every time and is invisible for hours: a same-day retest looks warm and green, and the
+  drop only appears after a genuinely new night enters the trailing window. **A green reading taken
+  without an intervening real night proves nothing.** The one command that settles it:
+
+      grep 'dayCache DROPPED' <strapLog.tail from a morning plist pull>
+
+  Any `sig changed:` naming a component that a cache hit does not actually replay is the same bug
+  wearing a new name — check the named component against what pass 2 recomputes before quantizing
+  it, and prefer the sentinel.
+- check-after: 2026-09-05
 
 ### The `@82` SpO2 candidate is shown as a track, and still is not a validated percentage
 - id: spo2-candidate-82-timeline
