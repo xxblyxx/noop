@@ -965,6 +965,23 @@ final class IntelligenceEngine: ObservableObject {
             var prepHrReadMs = 0.0      // the hrSample ∪ ppgHrSample read alone (the UNION + anti-join)
             var prepOtherReadMs = 0.0   // rr, resp, gravity, step, skinTemp, spo2, events, bandSleepState
             var prepMatchMs = 0.0       // day-slice filtering, off-wrist pairing, provided-sleep — post-read
+            // #1005-CONVERGE (2026-09-04): mid-loop checkpointing. The end-of-pass save below persists
+            // "once per pass, never per day" — which is correct for a pass that finishes, and worthless for
+            // one that doesn't. A `BGProcessingTask` fire that iOS terminates without cancelling (the
+            // 2026-09-04 pattern: 11 fires, no outcome, no expiry, no crash) unwinds nothing and persists
+            // nothing, so each fire re-scanned the same days and threw the result away. Checkpointing after
+            // a freshly-scored day makes fragmented fires ACCUMULATE: the next one finds those days cached
+            // and reaches further back.
+            //
+            // Throttled on elapsed time AND only after a day was actually scored fresh — a cache-hit day
+            // `continue`s above and its entry is already on disk byte-identical, so checkpointing it would
+            // re-encode the whole envelope for nothing. That matters because the checkpoint is O(window),
+            // not O(1): it re-projects every entry and encodes the full envelope (~407 KB on this device).
+            // Timed into the cost line so the interval can be tuned against a real number rather than a
+            // guess.
+            var checkpointMs = 0.0
+            var checkpointCount = 0
+            var lastCheckpointAt = Date()
             // #1005-COST (port of upstream #1556): days that were actually CACHEABLE this pass (freshly
             // scored AND stored under a key). Together with `dayCacheReused` this is the honest denominator
             // for the reuse ratio: `maxDays` counts loop iterations, so a store holding 8 real nights in a
@@ -1535,6 +1552,27 @@ final class IntelligenceEngine: ObservableObject {
                     // skip entry rather than leaving it to age out of the window filter below unused. Not
                     // load-bearing (a stale entry's `key` no longer matches and would just miss), tidiness.
                     daySkipCacheLocal.removeValue(forKey: day)
+                    // #1005-CONVERGE: checkpoint, so a fire terminated without cancellation still banks what
+                    // it scanned. Safe to write a partial map: `load()` validates every entry independently
+                    // against its own per-day key, and `dayCacheConfigSig` is fixed for the whole loop, so
+                    // ANY prefix of it is mutually consistent — a partial file can only ever hold FEWER days
+                    // than a complete one, never claim more. It is also un-pruned (the window filter runs
+                    // after the loop), which is harmless: the next pass prunes on load.
+                    if Date().timeIntervalSince(lastCheckpointAt) >= Self.dayScanCheckpointInterval {
+                        let t0 = Date()
+                        _ = DayScanCacheStore.save(
+                            configSig: dayCacheConfigSig,
+                            entries: dayScanCacheLocal.mapValues {
+                                DayScanCacheStore.Entry(key: $0.key,
+                                                        scan: DayScanCacheStore.Scan($0.scan))
+                            },
+                            skipEntries: daySkipCacheLocal.mapValues {
+                                DayScanCacheStore.SkipEntry(key: $0.key, hrCount: $0.hrCount)
+                            })
+                        checkpointMs += Date().timeIntervalSince(t0) * 1000
+                        checkpointCount += 1
+                        lastCheckpointAt = Date()
+                    }
                 }
                 out.append(scan)
             }
@@ -1572,6 +1610,13 @@ final class IntelligenceEngine: ObservableObject {
             // whether a later commit narrows the 54 h read window, adds an index, or is aimed elsewhere.
             skippedDayLines.append("analyzeRecent cost prep-split hrRead=\(Int(prepHrReadMs))ms "
                                    + "otherReads=\(Int(prepOtherReadMs))ms match=\(Int(prepMatchMs))ms")
+            // #1005-CONVERGE: what the mid-loop checkpointing actually cost, so the 5 s interval is tuned
+            // against a device number. Zero checkpoints on a fully-cached pass is the expected, healthy
+            // reading — nothing was scored fresh, so nothing needed banking.
+            if checkpointCount > 0 {
+                skippedDayLines.append("analyzeRecent cost checkpoints=\(checkpointCount) "
+                                       + "totalling \(Int(checkpointMs))ms")
+            }
             // #1005-STORM follow-up: report whether the loop `break`ed early on cancellation. Pass 2's
             // window reconcile (stale-day eviction, provenance wide-delete) MUST NOT span the full
             // `maxDays` window when `out` covers only the newest days the loop reached — see
@@ -2569,6 +2614,14 @@ final class IntelligenceEngine: ObservableObject {
     /// `analyzeWatermarkKey`'s existing precedent, so restoring a backup can never import another device's
     /// scheduling state.
     private static let lastPassEndedAtKey = "noop.analyze.lastPassEndedAt"
+
+    /// #1005-CONVERGE (2026-09-04): minimum wall-clock gap between mid-loop day-scan checkpoints. The
+    /// checkpoint re-projects every cached entry and encodes the whole envelope (~407 KB on device
+    /// `819D37A3`), so it is O(window) per write, not O(1) — too frequent and it eats the very budget it
+    /// exists to protect. 5 s puts ~3-5 writes in a warm pass (measured ~14-25 s post-`c863218a`) while
+    /// bounding what an unannounced termination can discard to a single day's work. Tune against the
+    /// `checkpoints=` figure in the cost line rather than by feel.
+    private static let dayScanCheckpointInterval: TimeInterval = 5
 
     /// CAPTURE-B (#814/#799): build the universal `dayOwner …` self-diagnostic line VERBATIM (the Test
     /// Centre export parser depends on this exact shape). `readId` is the owner this day was read+scored
